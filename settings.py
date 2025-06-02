@@ -49,7 +49,6 @@ MINER_MERGE_PARTITIONS = 0.6
 MINERS_REQUIRED_FOR_WEIGHT_UPLOADING = 0.7
 
 # swarm
-N_LAYERS = 2
 MINERS_PER_LAYER = 1
 # MODEL_SPLITS = [[-1, -1]]
 # MODEL_SPLITS = [[-1, 8], [8, -1]]
@@ -65,7 +64,8 @@ MINERS_PER_LAYER = 1
 
 # MODEL_SPLITS = [[-1, 9], [9, 19], [19, -1]] # For 3B models
 # MODEL_SPLITS = [[-1, 11], [11, 27], [27, -1]]  # For 12B models
-# MODEL_SPLITS = [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]] # 15B
+MODEL_SPLITS = [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]] # 15B
+N_LAYERS = len(MODEL_SPLITS)
 
 # 13B 5 layers
 MODEL_SPLITS = [[-1, 8], [8, 16], [16, 24], [24, 32], [32, -1]]
