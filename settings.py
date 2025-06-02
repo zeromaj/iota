@@ -65,7 +65,7 @@ MINERS_PER_LAYER = 1
 
 # MODEL_SPLITS = [[-1, 9], [9, 19], [19, -1]] # For 3B models
 # MODEL_SPLITS = [[-1, 11], [11, 27], [27, -1]]  # For 12B models
-# MODEL_SPLITS = [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]] # 15B
+MODEL_SPLITS = [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]] # 15B
 
 # 13B 5 layers
 MODEL_SPLITS = [[-1, 8], [8, 16], [16, 24], [24, 32], [32, -1]]
