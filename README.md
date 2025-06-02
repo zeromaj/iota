@@ -1,6 +1,15 @@
 # IOTA
 
-**I**ncentivized **O**rchestrated **T**raining **A**rchitecture
+**I**ncentivized **O**rchestrated **T**raining **A**rchitecture (IOTA) is a framework for pretraining large language models across a network of heterogeneous, unreliable, permissionless and token incentivized machines. IOTA employs a data- and pipeline-parallel architecture to accelerate training and reduce hardware requirements for participants.
+
+**Overview**:
+- Orchestrator distributes model layers across heterogeneous miners and streams activations between them.
+- All network communication is mediated via the orchestrator, and a shared S3 bucket is used to store activations and layer weights.
+- Miners compete to process as many activations as possible in the training stage.
+- Miners periodically upload their local weights and merge their activations using a variant of Butterfly All-Reduce.
+- Validators spot-check miners to ensure that work was performed as required.
+
+For a more comprehensive overview, please refer to our technical paper [here](https://www.macrocosmos.ai/research/iota_primer.pdf).
 
 ### Install
 1. First install uv (https://docs.astral.sh/uv/)
