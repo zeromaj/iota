@@ -10,15 +10,7 @@
 ### Miner Documentation
 Running the miner is as easy as `python launch_miner.py`. For more information, reference [the official miner docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-iota-mining-setup-guide)
 
+You can also run many miners on the same machine by running `python launch_miner.py --num_miners NUMBER_OF_MINERS`
+
 ### Validation Documentation
 Running the validator `python launch_validator.py`. For more information, reference [the official validator docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-validating)
-
-### Run
-
-To run a miner, execute
-
-`python launch_miner.py` - if you would like to launch multiple miners on the same machine, you can pass the number of miners as
-`python launch_miner.py --num_miners 10`
-
-To launch the orchestrator, run
-`python launch_orchestration.py`
