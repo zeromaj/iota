@@ -750,8 +750,11 @@ class Miner(BaseNeuron):
                 self.hotkey,
                 self.layer,
             )
-
-            input_activations = download_activation(path=input_activation_path)
+            try:
+                input_activations = download_activation(path=input_activation_path)
+            except Exception as e:
+                logger.error(f"Error downloading activation: {e}")
+                return
 
         output_activations, state = await self._forward(input_activations)
 
@@ -766,7 +769,11 @@ class Miner(BaseNeuron):
                     f"No input activation path found for layer {self.layer}, miner {self.hotkey} is idle. For activation {activation_uid} and layer path {initial_activations_path} was returned"
                 )
                 return
-            initial_activations = download_activation(path=initial_activations_path)
+            try:
+                initial_activations = download_activation(path=initial_activations_path)
+            except Exception as e:
+                logger.error(f"Error downloading initial activation: {e}")
+                return
 
             output_activations = model_utils.compute_loss(
                 logits=output_activations,
