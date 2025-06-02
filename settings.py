@@ -64,11 +64,10 @@ MINERS_PER_LAYER = 1
 
 # MODEL_SPLITS = [[-1, 9], [9, 19], [19, -1]] # For 3B models
 # MODEL_SPLITS = [[-1, 11], [11, 27], [27, -1]]  # For 12B models
-MODEL_SPLITS = [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]] # 15B
-N_LAYERS = len(MODEL_SPLITS)
-
+MODEL_SPLITS = [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]]  # 15B
 # 13B 5 layers
-MODEL_SPLITS = [[-1, 8], [8, 16], [16, 24], [24, 32], [32, -1]]
+# MODEL_SPLITS = [[-1, 8], [8, 16], [16, 24], [24, 32], [32, -1]]
+N_LAYERS = len(MODEL_SPLITS)
 TIMEOUT = 20000000000000000
 PHASE_TIMEOUT = 60 * 60  # 1 hour
 
@@ -91,14 +90,7 @@ ORCHESTRATOR_URL = f"{ORCHESTRATOR_SCHEME}://{ORCHESTRATOR_HOST}:{ORCHESTRATOR_P
 # S3
 S3_BUCKET = os.getenv("S3_BUCKET")
 USE_S3 = os.getenv("USE_S3") == "True"
-if USE_S3:
-    assert S3_BUCKET is not None, "S3_BUCKET must be set if USE_S3 is True"
-if not MOCK:
-    assert AWS_ACCESS_KEY_ID is not None, "AWS_ACCESS_KEY_ID must be set if MOCK is False"
-    assert AWS_SECRET_ACCESS_KEY is not None, "AWS_SECRET_ACCESS_KEY must be set if MOCK is False"
-    assert HF_TOKEN is not None, "HF_TOKEN must be set if MOCK is False"
-    # ignore this for now, we can introduce an envvar called ROLE to distinguish between orchestrator, validator and miner
-    # assert DEVICE.type == "cuda", "DEVICE must be a CUDA device if MOCK is False"
+
 
 # Epistula
 SIGNATURE_TIMEOUT_MS = 10000
