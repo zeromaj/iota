@@ -11,6 +11,9 @@
 
 For a more comprehensive overview, please refer to our technical paper [here](https://www.macrocosmos.ai/research/iota_primer.pdf).
 
+Current run: 
+15B parameter model, 5 layers
+
 ### Install
 1. First install uv (https://docs.astral.sh/uv/)
 2. Install packages using `uv sync`
