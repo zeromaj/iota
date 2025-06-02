@@ -26,3 +26,6 @@ You can also run many miners on the same machine by running `python launch_miner
 
 ### Validation Documentation
 Running the validator `python launch_validator.py`. For more information, reference [the official validator docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-validating)
+
+### Compute Requirements
+We recommend an A100 80GB, or larger machine. 
