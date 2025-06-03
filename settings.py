@@ -89,7 +89,7 @@ ORCHESTRATOR_URL = f"{ORCHESTRATOR_SCHEME}://{ORCHESTRATOR_HOST}:{ORCHESTRATOR_P
 
 # S3
 S3_BUCKET = os.getenv("S3_BUCKET")
-USE_S3 = os.getenv("USE_S3") == "True"
+USE_S3 = os.getenv("USE_S3", True) #always use it if not specified
 
 
 # Epistula
