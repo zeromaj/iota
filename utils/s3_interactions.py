@@ -6,6 +6,7 @@ import boto3
 import numpy as np
 from dotenv import load_dotenv
 from loguru import logger
+from botocore import UNSIGNED
 from botocore.exceptions import ClientError
 from urllib.parse import urlparse
 import settings

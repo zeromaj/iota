@@ -88,7 +88,7 @@ ORCHESTRATOR_URL = f"{ORCHESTRATOR_SCHEME}://{ORCHESTRATOR_HOST}:{ORCHESTRATOR_P
 
 # S3
 S3_BUCKET = os.getenv("S3_BUCKET")
-USE_S3 = os.getenv("USE_S3", True)  # always use it if not specified
+USE_S3 = os.getenv("USE_S3", True) # always use it if not specified
 
 
 # Epistula
@@ -101,7 +101,6 @@ VALIDATOR_HOSTS = (
     os.getenv("VALIDATOR_HOSTS", "localhost").strip().split(",") if os.getenv("VALIDATOR_HOSTS") else ["localhost"]
 )
 WEIGHT_SUBMIT_INTERVAL: int = 3600  # submit weight every 1 hour
-# SCORE_VALIDITY_PERIOD = 3600  # seconds. This is the lifetime of a score in the global score history
 SCORE_VALIDITY_PERIOD = 5000 * 12  # should be equal to immunity period
 
 # Validation Thresholds
