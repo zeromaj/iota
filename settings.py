@@ -101,7 +101,7 @@ VALIDATOR_COUNT = int(os.getenv("VALIDATOR_COUNT", "1"))
 VALIDATOR_HOSTS = (
     os.getenv("VALIDATOR_HOSTS", "localhost").strip().split(",") if os.getenv("VALIDATOR_HOSTS") else ["localhost"]
 )
-WEIGHT_SUBMIT_INTERVAL: int = 7200  # submit weight every 30 seconds
+WEIGHT_SUBMIT_INTERVAL: int = 3600  # submit weight every 1 hour
 SCORE_VALIDITY_PERIOD = 3600  # seconds. This is the lifetime of a score in the global score history
 
 # Validation Thresholds

@@ -514,6 +514,7 @@ class GradientValidator(BaseNeuron):
     async def weight_loop(self):
         while True:
             try:
+                logger.debug(f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: WEIGHT LOOP RUNNING")
                 await asyncio.sleep(settings.WEIGHT_SUBMIT_INTERVAL)
 
                 # Wait for the orchestrator to be healthy
@@ -603,7 +604,7 @@ class GradientValidator(BaseNeuron):
             logger.debug(f"Weight details: {weight_dict}")
 
             # Submit weights to Bittensor chain
-            success = self.subtensor.set_weights(
+            success, response = self.subtensor.set_weights(
                 wallet=self.wallet,
                 netuid=int(settings.netuid),
                 uids=processed_weight_uids,
@@ -614,8 +615,10 @@ class GradientValidator(BaseNeuron):
 
             if success:
                 logger.success("Successfully submitted weights to Bittensor.")
+                logger.debug(f"Response: {response}")
             else:
                 logger.error("Failed to submit weights to Bittensor")
+                logger.error(f"Response: {response}")
 
         except Exception as e:
             logger.exception(f"Error submitting weights to Bittensor: {e}")
