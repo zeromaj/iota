@@ -19,7 +19,6 @@ MODEL_CFG = LLAMA32_CONFIG_15B
 
 # Bittensor
 BITTENSOR = os.getenv("BITTENSOR") == "True"
-MINER_HOTKEYS = os.getenv("MINER_HOTKEYS", "m1,m2,m3,m4,m5,m6").strip().split(",")
 
 # Dataset
 DATASET_NAME = "HuggingFaceFW/fineweb"
@@ -89,7 +88,7 @@ ORCHESTRATOR_URL = f"{ORCHESTRATOR_SCHEME}://{ORCHESTRATOR_HOST}:{ORCHESTRATOR_P
 
 # S3
 S3_BUCKET = os.getenv("S3_BUCKET")
-USE_S3 = os.getenv("USE_S3", True) #always use it if not specified
+USE_S3 = os.getenv("USE_S3", True) # always use it if not specified
 
 
 # Epistula
@@ -102,7 +101,7 @@ VALIDATOR_HOSTS = (
     os.getenv("VALIDATOR_HOSTS", "localhost").strip().split(",") if os.getenv("VALIDATOR_HOSTS") else ["localhost"]
 )
 WEIGHT_SUBMIT_INTERVAL: int = 3600  # submit weight every 1 hour
-SCORE_VALIDITY_PERIOD = 3600  # seconds. This is the lifetime of a score in the global score history
+SCORE_VALIDITY_PERIOD = 5000 * 12  # should be equal to immunity period
 
 # Validation Thresholds
 COSINE_SIMILARITY_THRESHOLD = 0.9
@@ -140,6 +139,8 @@ if MOCK:
 network = os.getenv("network", "test")
 wallet_name = os.getenv("wallet_name", "test")
 wallet_hotkey = os.getenv("wallet_hotkey", "m1")
+MINER_HOTKEYS_ENV = os.getenv("MINER_HOTKEYS")
+MINER_HOTKEYS = MINER_HOTKEYS_ENV.strip().split(",") if MINER_HOTKEYS_ENV is not None else [wallet_hotkey]
 netuid = int(os.getenv("netuid", "141"))
 __spec_version__ = 1  # TODO  how to specify it correctly?
 # ==============================================

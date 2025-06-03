@@ -13,6 +13,7 @@ import settings
 from pathlib import Path
 import requests
 from botocore.client import Config
+from botocore import UNSIGNED
 from typing import Any, Literal
 import asyncio
 import aiohttp

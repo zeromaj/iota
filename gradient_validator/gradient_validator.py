@@ -512,37 +512,41 @@ class GradientValidator(BaseNeuron):
         return status
 
     async def weight_loop(self):
+        register_validator = True
         while True:
             try:
                 logger.debug(f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: WEIGHT LOOP RUNNING")
-                await asyncio.sleep(settings.WEIGHT_SUBMIT_INTERVAL)
+                if await self.api_client.health_check():
+                    if register_validator:
+                        logger.debug(f"Registering validator {self.wallet.hotkey.ss58_address[:8]} with orchestrator")
+                        await self.api_client.register_validator(
+                            host=self.external_ip,
+                            port=int(settings.VALIDATOR_EXTERNAL_PORT),
+                            scheme=settings.VALIDATOR_SCHEME,
+                        )
+                        register_validator = False
 
-                # Wait for the orchestrator to be healthy
-                orchestrator_was_offline = False
-                while not await self.api_client.health_check():
-                    logger.warning("Orchestrator is not healthy, waiting for it to come online")
-                    await asyncio.sleep(5)
-                    orchestrator_was_offline = True
+                    # Get global weights from API
+                    global_weights = await self.api_client.get_global_miner_weights()
+                else:
+                    register_validator = True
+                    logger.warning("Orchestrator is not healthy, skipping weight submission")
+                    global_weights = {}
 
-                if orchestrator_was_offline:
-                    logger.debug(f"Registering validator {self.wallet.hotkey.ss58_address[:8]} with orchestrator")
-                    await self.api_client.register_validator(
-                        host=self.external_ip,
-                        port=int(settings.VALIDATOR_EXTERNAL_PORT),
-                        scheme=settings.VALIDATOR_SCHEME,
-                    )
-
-                # Get global weights from API
-                global_weights = await self.api_client.get_global_miner_weights()
                 # Submit global weights to Bittensor
                 if global_weights:
                     logger.debug(f"Received global weights: {global_weights}")
                     self.set_weights(global_weights)
+                else:
+                    logger.warning("No global weights received, temporarily copying weights from the chain")
+                    self.set_weights(self.copy_weights_from_chain())
 
             except Exception as e:
                 logger.exception(f"Error in weight loop: {e}")
+            finally:
+                await asyncio.sleep(settings.WEIGHT_SUBMIT_INTERVAL)
 
-    def set_weights(self, weights: dict[int, float]):
+    def set_weights(self, weights: dict[str, float]):
         """
         Sets the validator weights to the metagraph hotkeys based on the global weights.
         """
@@ -622,6 +626,15 @@ class GradientValidator(BaseNeuron):
 
         except Exception as e:
             logger.exception(f"Error submitting weights to Bittensor: {e}")
+
+    def copy_weights_from_chain(self):
+        meta = self.subtensor.metagraph(netuid=int(settings.netuid), lite=False)
+        valid_indices = np.where(meta.validator_permit)[0]
+        valid_weights = meta.weights[valid_indices]
+        valid_stakes = meta.S[valid_indices]
+        normalized_stakes = valid_stakes / np.sum(valid_stakes)
+        stake_weighted_average = np.dot(normalized_stakes, valid_weights).astype(float).tolist()
+        return dict(zip(meta.hotkeys, list(stake_weighted_average)))
 
     async def start_weight_submission_task(self):
         logger.debug("STARTING WEIGHT SUBMISSION TASK")

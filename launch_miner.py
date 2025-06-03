@@ -87,4 +87,4 @@ if __name__ == "__main__":
     if args.env != "local":
         asyncio.run(main_docker(args.miner_hotkey))
     else:
-        asyncio.run(main(args.num_miners))
+        asyncio.run(main(len(settings.MINER_HOTKEYS)))
