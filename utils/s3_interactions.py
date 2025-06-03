@@ -36,7 +36,7 @@ def initialize_s3():
 
     if not settings.AWS_ACCESS_KEY_ID or not settings.AWS_SECRET_ACCESS_KEY:
         logger.warning("AWS credentials not found. Using default credentials.")
-        s3_client = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+        s3_client = boto3.client("s3", region_name=settings.AWS_REGION, config=Config(signature_version=UNSIGNED))
     else:
         s3_client = boto3.client(
             "s3",
