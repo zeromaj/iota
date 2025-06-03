@@ -6,6 +6,7 @@ import boto3
 import numpy as np
 from dotenv import load_dotenv
 from loguru import logger
+from botocore import UNSIGNED
 from botocore.exceptions import ClientError
 from urllib.parse import urlparse
 import settings
@@ -35,7 +36,7 @@ def initialize_s3():
 
     if not settings.AWS_ACCESS_KEY_ID or not settings.AWS_SECRET_ACCESS_KEY:
         logger.warning("AWS credentials not found. Using default credentials.")
-        s3_client = boto3.client("s3")
+        s3_client = boto3.client("s3", config=Config(signature_version=UNSIGNED))
     else:
         s3_client = boto3.client(
             "s3",
@@ -46,15 +47,6 @@ def initialize_s3():
         )
 
     logger.info(f"S3 client initialized with bucket: {settings.S3_BUCKET}")
-
-    try:
-        s3_client.head_bucket(Bucket=settings.S3_BUCKET)
-    except ClientError:
-        logger.info(f"Creating bucket {settings.S3_BUCKET}")
-        s3_client.create_bucket(
-            Bucket=settings.S3_BUCKET,
-            CreateBucketConfiguration={"LocationConstraint": settings.AWS_REGION},
-        )
 
 
 def normalize_s3_path(path: str) -> tuple[str, str]:
@@ -806,6 +798,39 @@ def delete(path: str):
             return
         os.remove(file_path)
         logger.debug(f"Deleted local file: {file_path}")
+
+
+def file_exists(path: str) -> bool:
+    """
+    Check if a file exists either on S3 or locally.
+
+    Args:
+        path: The path to check. Can be either an S3 path (s3://bucket/key) or a local path.
+
+    Returns:
+        bool: True if the file exists, False otherwise.
+    """
+    parsed = urlparse(path)
+
+    if parsed.scheme == "s3":
+        if not settings.USE_S3 or not s3_client:
+            logger.warning(f"S3 client not available, cannot check S3 path: {path}")
+            return False
+
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        try:
+            s3_client.head_object(Bucket=bucket, Key=key)
+            return True
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code == "404":
+                return False
+            else:
+                logger.error(f"Error checking if file exists on S3: {e}")
+                raise
+    else:
+        return Path(path).exists()
 
 
 # Initialize S3 client on import
