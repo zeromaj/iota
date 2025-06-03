@@ -34,7 +34,7 @@ import bittensor as bt
 from bittensor_wallet.mock import get_mock_wallet
 
 from utils.metagraph_syncer import MetagraphSyncer
-from utils.bt_utils import get_subtensor
+from utils.bt_utils import get_subtensor, NotRegisteredError
 from utils.partitions import ChunkData, Partition
 from utils.s3_interactions import download_metadata, download_weights_or_optimizer_state
 
@@ -271,7 +271,10 @@ class BaseNeuron(BaseModel):
             # Register listener for metagraph updates
             logger.info(f"Neuron initialized with metagraph syncing for uid {self.uid} on netuid {self.netuid}")
         if BITTENSOR:
-            self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+            try:
+                self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+            except ValueError:
+                raise NotRegisteredError(f"Hotkey {self.wallet.hotkey.ss58_address} not registered on {self.netuid}")
         else:
             self.uid = random.randint(0, 255)
 

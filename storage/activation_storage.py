@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from storage.serializers import ActivationResponse
 from loguru import logger
 import settings
+from utils.s3_interactions import file_exists
 
 
 # Constants
@@ -253,6 +254,15 @@ class ActivationStore(BaseModel):
                 ]
             )
 
+    def get_activation_path(
+        self, activation_uid: str, direction: Literal["forward", "backward", "initial"], layer: int
+    ):
+        """Get an activation from the activation store."""
+        activation_dict = self._get_activation_dict(direction)
+        if activation_uid not in activation_dict:
+            return None
+        return activation_dict[activation_uid].get_path(layer=layer, direction=direction)
+
     def _get_activation_dict(self, direction: Literal["forward", "backward", "initial"]):
         """Get the appropriate activation dictionary based on direction."""
         if direction == "initial":
@@ -269,6 +279,12 @@ class ActivationStore(BaseModel):
         miner_hotkey: str,
     ):
         try:
+            if not file_exists(activation_path):
+                logger.warning(
+                    f"Activation {activation_uid} not found in {activation_path}, miner {miner_hotkey} uploaded and invalid activation"
+                )
+                return None
+
             logger.debug(
                 f"UPLOADING ACTIVATION |  {activation_uid} | DIRECTION: {direction} | LAYER: {layer} | PATH: {activation_path}"
             )
@@ -599,6 +615,10 @@ class ActivationStore(BaseModel):
             logger.exception(f"Error checking if activation is active: {e}")
             return False
 
+    async def does_activation_exist(self, activation_uid: str) -> bool:
+        """Check if an activation exists in the activation store."""
+        return activation_uid in self.activations or activation_uid in self.initial_activations
+
     async def reset_layer(self, layer: int):
         _log_operation(
             "reset_layer",
@@ -614,16 +634,6 @@ class ActivationStore(BaseModel):
         for activation in self.initial_activations.values():
             if activation.layer == layer:
                 activation.state = ActivationState.ARCHIVED
-
-    # async def reset(self):
-    #     for activation in self.activations.values():
-    #         activation.state = ActivationState.ARCHIVED
-    #     for activation in self.initial_activations.values():
-    #         activation.state = ActivationState.ARCHIVED
-
-    #     self.activations = {}
-    #     self.initial_activations = {}
-    #     _log_operation("activation_store_reinit", None, None, None, None, None)
 
     def __del__(self):
         # Cleanup any remaining activation files

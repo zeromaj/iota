@@ -145,4 +145,10 @@ def verify_entity_type(
     }
 
 
+class NotRegisteredError(Exception):
+    """Custom exception for when a hotkey is not registered."""
+
+    pass
+
+
 subtensor = get_subtensor()
