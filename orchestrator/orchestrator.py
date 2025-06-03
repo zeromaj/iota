@@ -308,9 +308,9 @@ class Orchestrator(BaseModel):
         3. Validates activations if needed
         4. Checks for merging phase conditions
         """
-
-        # Auto-initialize validator pool if not already
-
+        if not self.activation_store.does_activation_exist(activation_uid):
+            logger.warning(f"Activation {activation_uid} does not exist in activation store")
+            return
         # Try to pick a miner for validation if this is the first run
         if self.validator_pool.get_available_validators():
             async with self.validator_init_lock:
@@ -356,6 +356,7 @@ class Orchestrator(BaseModel):
                 attribute="backwards_since_reset",
                 value=backwards_since_reset,
             )
+            await self.submit_miner_scores({hotkey: 1})
 
             # Track cache removal: when a miner completes backward pass, remove activation from cache
             try:
@@ -1703,6 +1704,8 @@ class Orchestrator(BaseModel):
             dict: Dictionary mapping miner UIDs to their sum of scores in the last SCORE_VALIDITY_PERIOD seconds
         """
         current_scores = {}
+        for hotkey in self.miner_registry.get_all_miner_data().keys():
+            current_scores[hotkey] = 1
 
         for uid, score_history in self.global_miner_scores.items():
             if not score_history:
