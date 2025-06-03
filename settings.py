@@ -141,7 +141,7 @@ wallet_name = os.getenv("wallet_name", "test")
 wallet_hotkey = os.getenv("wallet_hotkey", "m1")
 MINER_HOTKEYS_ENV = os.getenv("MINER_HOTKEYS")
 MINER_HOTKEYS = MINER_HOTKEYS_ENV.strip().split(",") if MINER_HOTKEYS_ENV is not None else [wallet_hotkey]
-netuid = int(os.getenv("netuid", "141"))
+netuid = int(os.getenv("netuid", "9"))
 __spec_version__ = 1  # TODO  how to specify it correctly?
 # ==============================================
 # DASHBOARD
