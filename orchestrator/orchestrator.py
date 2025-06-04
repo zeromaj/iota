@@ -1,3 +1,4 @@
+import io
 import csv
 import copy
 import time
@@ -37,7 +38,9 @@ from utils.bt_utils import subtensor
 from utils.metagraph_syncer import MetagraphSyncer
 from utils.shared_states import MergingPhase, MergingPhaseManager
 from utils.partitions import PartitionManager, Partition
+from utils.s3_interactions import generate_presigned_url, upload_to_bucket
 
+CHAIN_SCORES_LOCATIONS = "scores/miner_scores.json"
 
 class Orchestrator(BaseModel):
     """Main orchestrator class that manages miners, validators, and model training coordination.
@@ -1738,6 +1741,21 @@ class Orchestrator(BaseModel):
             else:
                 current_scores[uid] = sum_scores
                 logger.warning(f"Miner {uid} not found in the miner_registry, but it's in the global_miner_scores... This shouldn't happen.")
+
+        # Upload the current scores to the S3 bucket
+        try:
+            # Convert scores to JSON string
+            scores_json = json.dumps(current_scores)
+            scores_bytes = scores_json.encode('utf-8')
+                        
+            # Get presigned URL and upload
+            presigned_data = generate_presigned_url(path=CHAIN_SCORES_LOCATIONS)
+            buffer = io.BytesIO(scores_bytes)
+            upload_to_bucket(presigned_data, {"file": ("data", buffer)})
+            
+            logger.debug(f"Successfully uploaded miner scores to S3: {CHAIN_SCORES_LOCATIONS}")
+        except Exception as e:
+            logger.error(f"Failed to upload miner scores to S3: {e}")
 
         return current_scores
 
