@@ -11,7 +11,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 # Configure loguru logger
 logger.remove()  # Remove default handler
-logger.add(sys.stderr, level="DEBUG")  # Add stderr handler for terminal output
+logger.add(sys.stderr, level="INFO")  # Add stderr handler for terminal output
 if os.path.exists("orchestrator.log"):
     try:
         os.remove("orchestrator.log")
@@ -19,12 +19,12 @@ if os.path.exists("orchestrator.log"):
     except OSError as e:
         logger.error(f"Error removing miners.log: {e}")
 
-logger.add(
-    "orchestrator.log",
-    rotation="5 MB",  # Rotate at 5MB
-    level="DEBUG",
-    retention=1,  # Keep only latest log file
-)
+# logger.add(
+#     "orchestrator.log",
+#     rotation="5 MB",  # Rotate at 5MB
+#     level="DEBUG",
+#     retention=1,  # Keep only latest log file
+# )
 
 
 app = FastAPI()

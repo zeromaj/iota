@@ -161,10 +161,10 @@ async def download_activation(
 
             return StorageResponse(message="Activation downloaded successfully", data={"path": path})
         except Exception as e:
-            logger.exception(f"Error downloading activation: {e}")
+            logger.error(f"Error downloading activation: {e}")
             return StorageResponse(message="Error downloading activation", data={"path": None})
     except Exception as e:
-        logger.exception(f"Error downloading activation: {e}")
+        logger.error(f"Error downloading activation: {e}")
         return StorageResponse(message="Error downloading activation", data={"path": None})
 
 
@@ -253,8 +253,12 @@ async def get_random_activation(
     try:
         activation_response = await orchestrator.get_miner_activation(hotkey=signed_by)
         return activation_response
+    except ValueError as e:
+        logger.error(f"Error getting miner activation: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        logger.exception(f"Error getting miner activation: {e}")
+        logger.error(f"Error getting miner activation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
     # cached_activations = orchestrator.miner_registry.get_miner_cached_activations(signed_by)
     # if len(cached_activations) >= settings.MAX_ACTIVATION_CACHE_SIZE:
@@ -612,7 +616,7 @@ async def get_layer_weights(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     except Exception as ex:
-        logger.exception(f"Failed to get layer weights: {ex}")
+        logger.error(f"Failed to get layer weights: {ex}")
 
 
 @router.get("/presigned_url", response_model=StorageResponse)

@@ -115,7 +115,7 @@ class MinerRegistry(BaseModel):
         """Get miner data for a specific miner."""
         miner: MinerData | None = self.registry.get(miner_hotkey)
         if miner is None:
-            raise ValueError(f"Miner {miner_hotkey} not found in registry, possible miners: {self.registry.keys()}")
+            raise ValueError(f"Miner {miner_hotkey} not found in registry, possible miners")
         return miner
 
     def update_miner_data(self, miner_hotkey: str, miner_data: MinerData) -> None:

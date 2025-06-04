@@ -286,7 +286,7 @@ class ValidatorClientPool(BaseModel):
                 f"Miner {miner_hotkey} not tracked, but weight verification requested. Tracked miners: {await self.get_tracked_miners()}"
             )
         except Exception as e:
-            logger.exception(f"Error validating weights: {e}")
+            logger.error(f"Error validating weights: {e}")
 
     async def add_validator(self, host: str, port: int, scheme: str = "http", hotkey: str | None = None) -> bool:
         """Add a validator to the pool.

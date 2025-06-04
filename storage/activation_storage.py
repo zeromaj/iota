@@ -26,7 +26,7 @@ def cleanup_activation_cache():
         if os.path.exists(LOG_FILE):
             os.remove(LOG_FILE)
     except Exception as e:
-        logger.exception(f"Error cleaning up activation cache: {e}")
+        logger.error(f"Error cleaning up activation cache: {e}")
 
 
 def _log_operation(
@@ -369,7 +369,7 @@ class ActivationStore(BaseModel):
             return activation_path
 
         except Exception as e:
-            logger.exception(f"Error uploading activation: {e}")
+            logger.error(f"Error uploading activation: {e}")
 
     async def download_activation_from_activation_store(
         self,
@@ -429,7 +429,7 @@ class ActivationStore(BaseModel):
             return historic_path
 
         except Exception as e:
-            logger.exception(f"Error downloading activation: {e}")
+            logger.error(f"Error downloading activation: {e}")
 
     async def list_activations(
         self,
@@ -467,7 +467,7 @@ class ActivationStore(BaseModel):
             )
             return result
         except Exception as e:
-            logger.exception(f"Error listing activations: {e}")
+            logger.error(f"Error listing activations: {e}")
             return []  # Return empty list instead of None when there's an error
 
     async def get_miner_activation(self, layer: int, cached_activations: list[str], hotkey: str):
@@ -612,7 +612,7 @@ class ActivationStore(BaseModel):
 
             return normal_activation_active and initial_activation_active
         except Exception as e:
-            logger.exception(f"Error checking if activation is active: {e}")
+            logger.error(f"Error checking if activation is active: {e}")
             return False
 
     async def does_activation_exist(self, activation_uid: str) -> bool:
