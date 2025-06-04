@@ -527,7 +527,7 @@ class GradientValidator(BaseNeuron):
                         register_validator = False
 
                     # Get global weights from API
-                    global_weights = await self.api_client.get_global_miner_weights()
+                    global_weights: dict[int, float] = await self.api_client.get_global_miner_weights()
                 else:
                     register_validator = True
                     logger.warning("Orchestrator is not healthy, skipping weight submission")
@@ -536,7 +536,7 @@ class GradientValidator(BaseNeuron):
                 # Submit global weights to Bittensor
                 if global_weights:
                     logger.debug(f"Received global weights: {global_weights}")
-                    self.set_weights(global_weights)
+                    self.set_weights(weights = global_weights)
                 else:
                     logger.warning("No global weights received, temporarily copying weights from the chain")
                     self.set_weights(self.copy_weights_from_chain())
@@ -546,7 +546,7 @@ class GradientValidator(BaseNeuron):
             finally:
                 await asyncio.sleep(settings.WEIGHT_SUBMIT_INTERVAL)
 
-    def set_weights(self, weights: dict[str, float]):
+    def set_weights(self, weights: dict[int, float]):
         """
         Sets the validator weights to the metagraph hotkeys based on the global weights.
         """
@@ -571,12 +571,9 @@ class GradientValidator(BaseNeuron):
         try:
             # Convert global weights to tensor, Global state of scores is on the orchestrator
             scores = torch.zeros(len(self.metagraph.uids), dtype=torch.float32)
-            for hotkey, weight in weights.items():
-                if hotkey in self.metagraph.hotkeys:
-                    scores[self.metagraph.hotkeys.index(hotkey)] = weight
-                else:
-                    logger.warning(f"Hotkey {hotkey} not found in metagraph, skipping weight submission")
-                    continue
+            for uid, weight in weights.items():
+                scores[uid] = weight
+                
             # Check if scores contains any NaN values
             if torch.isnan(scores).any():
                 logger.warning("Scores contain NaN values. Replacing with 0.")

@@ -7,8 +7,8 @@ from settings import MAX_ACTIVATION_CACHE_SIZE
 class MinerData(BaseModel):
     """Holds all data for a miner"""
 
-    uid: int
     hotkey: str
+    uid: int | None = None
     layer: int | None = None
     status: Literal["forward", "backward", "idle"] = "idle"
     backwards_since_reset: int = 0

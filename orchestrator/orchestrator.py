@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field, model_validator
 
 import bittensor as bt
+import numpy as np
 from bittensor_wallet.mock import get_mock_wallet
 
 from loguru import logger
@@ -211,7 +212,7 @@ class Orchestrator(BaseModel):
             # Get the uid of the miner
             uid = self.metagraph.uids[self.metagraph.hotkeys.index(hotkey)]
         else:
-            uid = None
+            uid = np.random.randint(1, 255)
 
         # Check if miner is already registered
         if hotkey in self.miner_registry.get_all_miner_data().keys():
