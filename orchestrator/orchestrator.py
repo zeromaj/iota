@@ -1036,10 +1036,28 @@ class Orchestrator(BaseModel):
         if self.dashboard_reporter:
             await self.dashboard_reporter.close()
 
+    def _load_saved_scores(self):
+        # Try to load previous scores from S3
+        try:
+            from utils.s3_interactions import s3_client
+            if s3_client:
+                response = s3_client.get_object(Bucket=settings.S3_BUCKET, Key=CHAIN_SCORES_LOCATIONS)
+                scores = json.loads(response["Body"].read())
+                logger.info(f"Loaded previous scores from S3: {CHAIN_SCORES_LOCATIONS}")
+                
+                # Add scores with current timestamp
+                current_time = time.time()
+                for uid_str, score in scores.items():
+                    self.global_miner_scores[int(uid_str)].append((current_time, score))
+
+        except Exception as e:
+            logger.warning(f"Could not load previous scores from S3: {e}")
+
     async def initialize(self):
         """Initialize the orchestrator and its components."""
         # Initialize base components first
         self._initialize_miner_registry()
+        self._load_saved_scores()
 
         # Initialize dashboard reporter if enabled
         if settings.ENABLE_DASHBOARD_REPORTING and settings.DASHBOARD_BASE_URL:
