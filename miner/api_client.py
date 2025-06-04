@@ -56,7 +56,7 @@ class APIClient:
             logger.exception(f"Failed to submit miner weights: {e}")
             return None
 
-    async def get_global_miner_weights(self) -> Dict[str, Any]:
+    async def get_global_miner_weights(self) -> Dict[int, Any]:
         return await self._make_request("get", f"{self.base_url}/orchestrator/global_miner_weights")
 
     async def _make_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:

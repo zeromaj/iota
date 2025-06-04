@@ -27,7 +27,7 @@ router = APIRouter(prefix="/orchestrator")
 # Load in the initialized state of the orchestrator
 
 
-@router.get("/global_miner_weights", response_model=dict[str, float])
+@router.get("/global_miner_weights", response_model=dict[int, float])
 async def get_global_miner_weights():
     return await orchestrator.get_global_miner_scores()
 

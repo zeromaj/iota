@@ -1,3 +1,4 @@
+import io
 import csv
 import copy
 import time
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field, model_validator
 
 import bittensor as bt
+import numpy as np
 from bittensor_wallet.mock import get_mock_wallet
 
 from loguru import logger
@@ -37,7 +39,9 @@ from utils.bt_utils import subtensor
 from utils.metagraph_syncer import MetagraphSyncer
 from utils.shared_states import MergingPhase, MergingPhaseManager
 from utils.partitions import PartitionManager, Partition
+from utils.s3_interactions import generate_presigned_url, upload_to_bucket
 
+CHAIN_SCORES_LOCATIONS = "scores/miner_scores.json"
 
 class Orchestrator(BaseModel):
     """Main orchestrator class that manages miners, validators, and model training coordination.
@@ -172,6 +176,7 @@ class Orchestrator(BaseModel):
                     for hk in deregistered_hotkeys:
                         logger.warning(f"Tracked miner {hk[:8]}... no longer exists in metagraph")
                         self.miner_registry.remove_miner_from_registry(miner_hotkey=hk)
+                        self.global_miner_scores.pop(self.miner_registry.get_miner_data(miner_hotkey=hk).uid, None)
 
                     self._update_dashboard_callback()
 
@@ -189,6 +194,8 @@ class Orchestrator(BaseModel):
         2. Checks if the miner is already registered
         3. Assigns a layer to the miner
         4. Adds the miner to the registry
+
+        Return the layer assigned to the miner.
         """
         logger.debug(f"Attempting to register miner {hotkey[:8]}...")
 
@@ -202,15 +209,20 @@ class Orchestrator(BaseModel):
                 logger.warning(f"Miner {hotkey[:8]} not found in metagraph")
                 return
 
+            # Get the uid of the miner
+            uid = self.metagraph.uids[self.metagraph.hotkeys.index(hotkey)]
+        else:
+            uid = np.random.randint(1, 255)
+
         # Check if miner is already registered
         if hotkey in self.miner_registry.get_all_miner_data().keys():
             logger.info(f"Miner {hotkey[:8]} already registered, returning already assigned layer")
             return self.miner_registry.get_miner_data(miner_hotkey=hotkey).layer
+        
         try:
             # Assign a layer to the miner during registration
             layer = await self.request_layer()
-
-            self.miner_registry.add_miner_to_registry(miner_hotkey=hotkey, layer=layer)
+            self.miner_registry.add_miner_to_registry(miner_hotkey=hotkey, layer=layer, uid=uid)
 
             logger.info(f"Successfully registered miner {hotkey[:8]} (Layer: {layer})")
 
@@ -346,6 +358,7 @@ class Orchestrator(BaseModel):
                 logger.warning(f"Failed to add activation uid {activation_uid} to cache for miner {hotkey[:8]}: {e}")
 
         # Check to see if the activation is actually being tracked by this miner. Redundancy.
+        scores_to_submit = {}
         if status == "backward" and self.miner_registry.is_activation_cached_by_miner(
             miner_hotkey=hotkey, activation_uid=activation_uid
         ):
@@ -356,14 +369,18 @@ class Orchestrator(BaseModel):
                 attribute="backwards_since_reset",
                 value=backwards_since_reset,
             )
-            await self.submit_miner_scores({hotkey: 1})
+
+            scores_to_submit[self.miner_registry.get_miner_data(miner_hotkey=hotkey).uid] = 1
 
             # Track cache removal: when a miner completes backward pass, remove activation from cache
             try:
-                self.miner_registry.remove_from_miner_cache(hotkey, activation_uid)
+                self.miner_registry.remove_from_miner_cache(miner_hotkey=hotkey, activation_uid=activation_uid)
                 logger.debug(f"Removed activation {activation_uid} from miner {hotkey[:8]} cache after backward pass")
             except Exception as e:
                 logger.warning(f"Failed to remove activation from cache for miner {hotkey[:8]}: {e}")
+
+        if scores_to_submit:
+            await self.submit_miner_scores(scores = scores_to_submit)
 
         # Validating activations
         validation_success = True
@@ -1020,10 +1037,30 @@ class Orchestrator(BaseModel):
         if self.dashboard_reporter:
             await self.dashboard_reporter.close()
 
+    def _load_saved_scores(self):
+        # Try to load previous scores from S3
+        try:
+            from utils.s3_interactions import s3_client
+            if s3_client:
+                response = s3_client.get_object(Bucket=settings.S3_BUCKET, Key=CHAIN_SCORES_LOCATIONS)
+                scores = json.loads(response["Body"].read())
+                logger.info(f"Loaded previous scores from S3: {CHAIN_SCORES_LOCATIONS}")
+                
+                # Add scores with current timestamp
+                current_time = time.time()
+                for uid_str, score in scores.items():
+                    self.global_miner_scores[int(uid_str)].append((current_time, score))
+
+        except Exception as e:
+            logger.warning(f"Could not load previous scores from S3: {e}")
+            
+        logger.success(f"Global miner scores: {self.global_miner_scores}")
+
     async def initialize(self):
         """Initialize the orchestrator and its components."""
         # Initialize base components first
         self._initialize_miner_registry()
+        self._load_saved_scores()
 
         # Initialize dashboard reporter if enabled
         if settings.ENABLE_DASHBOARD_REPORTING and settings.DASHBOARD_BASE_URL:
@@ -1058,6 +1095,7 @@ class Orchestrator(BaseModel):
                             f"Miner {loaded_miner_hotkey[:8]} not found in metagraph, removing from registry"
                         )
                         state["miner_registry"].remove_miner_from_registry(miner_hotkey=loaded_miner_hotkey)
+                        self.global_miner_scores.pop(self.miner_registry.get_miner_data(miner_hotkey=loaded_miner_hotkey).uid, None)
 
             try:
                 # Get all field names from the Pydantic model
@@ -1688,14 +1726,16 @@ class Orchestrator(BaseModel):
         # update global scores history
         for uid, score in scores.items():
             score_in_history = self.global_miner_scores.get(uid, [])
-            score_in_history.append((timestamp, score))
+            score_in_history.append((timestamp, score)) # This will also add it to self.global_miner_scores due to python memory reference
+
+            historical_scores = [] 
 
             # remove scores older than SCORE_VALIDITY_PERIOD before updating the global scores history
-            score_in_history = [
-                score for score in score_in_history if score[0] > time.time() - settings.SCORE_VALIDITY_PERIOD
-            ]
+            for historical_timestamp, historical_score in score_in_history:
+                if historical_timestamp > time.time() - settings.SCORE_VALIDITY_PERIOD:
+                    historical_scores.append((historical_timestamp, historical_score))
 
-            self.global_miner_scores[uid] = score_in_history
+            self.global_miner_scores[uid] = historical_scores
 
     async def get_global_miner_scores(self):
         """Calculate sum of scores for each miner in the last SCORE_VALIDITY_PERIOD seconds.
@@ -1704,22 +1744,41 @@ class Orchestrator(BaseModel):
             dict: Dictionary mapping miner UIDs to their sum of scores in the last SCORE_VALIDITY_PERIOD seconds
         """
         current_scores = {}
-        for hotkey in self.miner_registry.get_all_miner_data().keys():
-            current_scores[hotkey] = 1
+
+        # give a base score if you're registered with the orchestrator.
+        for miner_data in self.miner_registry.get_all_miner_data().values():
+            current_scores[miner_data.uid] = 1
 
         for uid, score_history in self.global_miner_scores.items():
             if not score_history:
                 continue
 
-            # get sum of scores for the last SCORE_VALIDITY_PERIOD seconds
-            sum_scores = sum(
-                score for timestamp, score in score_history if timestamp > time.time() - settings.SCORE_VALIDITY_PERIOD
-            )
+            # get sum of scores since it's already been filtered by time in the submit_miner_scores method
+            sum_scores = sum(score for _, score in score_history)
 
-            current_scores[uid] = sum_scores
+            # add the sum of scores to the current scores
+            if uid in current_scores:
+                current_scores[uid] += sum_scores
+            else:
+                current_scores[uid] = sum_scores
+                logger.warning(f"Miner {uid} not found in the miner_registry, but it's in the global_miner_scores... This shouldn't happen.")
 
+        # Upload the current scores to the S3 bucket
+        self.upload_data_to_s3(data = current_scores, path = CHAIN_SCORES_LOCATIONS)
         return current_scores
-
+    
+    def upload_data_to_s3(self, data, path: str):
+        try:
+            scores_json = json.dumps(data)
+            scores_bytes = scores_json.encode('utf-8')
+                    
+            # Get presigned URL and upload
+            presigned_data = generate_presigned_url(path=path)
+            buffer = io.BytesIO(scores_bytes)
+            upload_to_bucket(presigned_data, {"file": ("data", buffer)})        
+        except Exception as e:
+            logger.error(f"Failed to upload miner scores to S3: {e}")
+            
     def get_miners_grid_status(self) -> Dict[str, Any]:
         """Get comprehensive miner status data for grid visualization."""
         # Get the base grid data from the miner registry
