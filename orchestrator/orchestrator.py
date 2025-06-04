@@ -1704,8 +1704,11 @@ class Orchestrator(BaseModel):
             dict: Dictionary mapping miner UIDs to their sum of scores in the last SCORE_VALIDITY_PERIOD seconds
         """
         current_scores = {}
+        hotkey_to_uid = {hotkey: uid for hotkey, uid in zip(self.metagraph.hotkeys, self.metagraph.uids)}
+
+        # give a base score if you're registered with the orchestrator.
         for hotkey in self.miner_registry.get_all_miner_data().keys():
-            current_scores[hotkey] = 1
+            current_scores[hotkey_to_uid[hotkey]] = 1
 
         for uid, score_history in self.global_miner_scores.items():
             if not score_history:
@@ -1716,7 +1719,8 @@ class Orchestrator(BaseModel):
                 score for timestamp, score in score_history if timestamp > time.time() - settings.SCORE_VALIDITY_PERIOD
             )
 
-            current_scores[uid] = sum_scores
+            # add the sum of scores to the current scores
+            current_scores[uid] += sum_scores
 
         return current_scores
 
