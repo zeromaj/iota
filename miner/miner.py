@@ -1,5 +1,4 @@
 import asyncio
-import random
 import time
 import uuid
 import json
@@ -263,7 +262,7 @@ class Miner(BaseNeuron):
                     if self.reregister_needed:
                         await asyncio.sleep(10)
                     else:
-                        await asyncio.sleep(random.random() * 0.1)
+                        await asyncio.sleep(2)
 
                     await self.print_status()
 
