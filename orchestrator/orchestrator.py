@@ -1052,6 +1052,8 @@ class Orchestrator(BaseModel):
 
         except Exception as e:
             logger.warning(f"Could not load previous scores from S3: {e}")
+            
+        logger.success(f"Global miner scores: {self.global_miner_scores}")
 
     async def initialize(self):
         """Initialize the orchestrator and its components."""
@@ -1761,22 +1763,21 @@ class Orchestrator(BaseModel):
                 logger.warning(f"Miner {uid} not found in the miner_registry, but it's in the global_miner_scores... This shouldn't happen.")
 
         # Upload the current scores to the S3 bucket
+        self.upload_data_to_s3(data = current_scores, path = CHAIN_SCORES_LOCATIONS)
+        return current_scores
+    
+    def upload_data_to_s3(self, data, path: str):
         try:
-            # Convert scores to JSON string
-            scores_json = json.dumps(current_scores)
+            scores_json = json.dumps(data)
             scores_bytes = scores_json.encode('utf-8')
-                        
+                    
             # Get presigned URL and upload
-            presigned_data = generate_presigned_url(path=CHAIN_SCORES_LOCATIONS)
+            presigned_data = generate_presigned_url(path=path)
             buffer = io.BytesIO(scores_bytes)
-            upload_to_bucket(presigned_data, {"file": ("data", buffer)})
-            
-            logger.debug(f"Successfully uploaded miner scores to S3: {CHAIN_SCORES_LOCATIONS}")
+            upload_to_bucket(presigned_data, {"file": ("data", buffer)})        
         except Exception as e:
             logger.error(f"Failed to upload miner scores to S3: {e}")
-
-        return current_scores
-
+            
     def get_miners_grid_status(self) -> Dict[str, Any]:
         """Get comprehensive miner status data for grid visualization."""
         # Get the base grid data from the miner registry
