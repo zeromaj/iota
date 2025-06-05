@@ -26,7 +26,7 @@ def cleanup_activation_cache():
         if os.path.exists(LOG_FILE):
             os.remove(LOG_FILE)
     except Exception as e:
-        logger.exception(f"Error cleaning up activation cache: {e}")
+        logger.error(f"Error cleaning up activation cache: {e}")
 
 
 def _log_operation(

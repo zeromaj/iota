@@ -600,6 +600,8 @@ async def get_layer_weights(
                 raise HTTPException(status_code=500, detail=str(e))
         except Exception as ex:
             logger.error(f"Failed to get layer weights: {ex}")
+    except Exception as ex:
+        logger.error(f"Failed to get layer weights: {ex}")
 
 
 @router.get("/presigned_url", response_model=StorageResponse)
