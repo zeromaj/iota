@@ -624,7 +624,7 @@ class GradientValidator(BaseNeuron):
         valid_stakes = meta.S[valid_indices]
         normalized_stakes = valid_stakes / np.sum(valid_stakes)
         stake_weighted_average = np.dot(normalized_stakes, valid_weights).astype(float).tolist()
-        return dict(zip(meta.hotkeys, list(stake_weighted_average)))
+        return dict(zip(meta.uids, list(stake_weighted_average)))
 
     async def start_weight_submission_task(self):
         logger.debug("STARTING WEIGHT SUBMISSION TASK")
