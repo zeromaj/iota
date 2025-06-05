@@ -527,12 +527,12 @@ class GradientValidator(BaseNeuron):
                     global_weights = {}
 
                 # Submit global weights to Bittensor
-                if global_weights:
+                if len(global_weights) > 0:
                     logger.debug(f"Received global weights: {global_weights}")
                     self.set_weights(weights=global_weights)
                 else:
                     logger.warning("No global weights received, temporarily copying weights from the chain")
-                    self.set_weights(self.copy_weights_from_chain())
+                    self.set_weights(weights=self.copy_weights_from_chain())
 
             except Exception as e:
                 logger.exception(f"Error in weight loop: {e}")
@@ -580,6 +580,14 @@ class GradientValidator(BaseNeuron):
             # Normalize weights
             raw_weights = torch.nn.functional.normalize(scores, p=1, dim=0)
 
+            if settings.BURN_FACTOR > 1 and settings.netuid == 9:
+                # Divide the raw_weights by settings.burn_factor before further processing
+                raw_weights = raw_weights / settings.BURN_FACTOR
+
+                # Add the 1-1/burn factor to the 209th uid
+                if len(raw_weights) > 209:  # 209 is the owner hotkey of sn9
+                    raw_weights[209] += 1 - 1 / settings.BURN_FACTOR
+
             # Process the raw weights to final_weights via subtensor limitations
             (
                 processed_weight_uids,
@@ -617,14 +625,19 @@ class GradientValidator(BaseNeuron):
         except Exception as e:
             logger.exception(f"Error submitting weights to Bittensor: {e}")
 
-    def copy_weights_from_chain(self):
+    def copy_weights_from_chain(self) -> dict[int, float]:
+        """Copy weights from the chain to the validator.
+
+        Returns:
+            dict[int, float]: A dictionary of weights for each miner.
+        """
         meta = self.subtensor.metagraph(netuid=int(settings.netuid), lite=False)
         valid_indices = np.where(meta.validator_permit)[0]
         valid_weights = meta.weights[valid_indices]
         valid_stakes = meta.S[valid_indices]
         normalized_stakes = valid_stakes / np.sum(valid_stakes)
         stake_weighted_average = np.dot(normalized_stakes, valid_weights).astype(float).tolist()
-        return dict(zip(meta.hotkeys, list(stake_weighted_average)))
+        return dict(zip(meta.uids, list(stake_weighted_average)))
 
     async def start_weight_submission_task(self):
         logger.debug("STARTING WEIGHT SUBMISSION TASK")
