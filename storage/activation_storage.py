@@ -328,6 +328,10 @@ class ActivationStore(BaseModel):
                     miner_hotkey=miner_hotkey,
                 )
             else:
+                if layer != 0:
+                    if activation_uid not in activation_dict:
+                        logger.error(f"Activation {activation_uid} not found in activation store")
+                        return None
                 activation = activation_dict[activation_uid]
 
                 # TODO: THINK ABOUT THIS
@@ -483,7 +487,6 @@ class ActivationStore(BaseModel):
             include_pending=False,
             miner_hotkey=hotkey,
         )
-        # logger.debug(f"BACKWARDS ACTIVATIONS FOR MINER {hotkey} ON LAYER {layer}: {backwards_activations}")
         for available_activation in backwards_activations:
             if available_activation.activation_uid in cached_activations:
                 logger.debug(
@@ -502,7 +505,6 @@ class ActivationStore(BaseModel):
             include_pending=False,
             miner_hotkey=hotkey,
         )
-        # logger.debug(f"FORWARDS ACTIVATIONS FOR MINER {hotkey} ON LAYER {layer}: {forwards_activations}")
         if not forwards_activations:
             logger.debug(f"NO FORWARDS ACTIVATION FOUND FOR MINER {hotkey} ON LAYER {layer}")
             return ActivationResponse(activation_uid=None, direction=None, activation_path=None)
@@ -534,6 +536,10 @@ class ActivationStore(BaseModel):
                     initial_activation_path=initial_activation.path,
                 )
                 return response
+
+        logger.error(
+            f"No activation found for miner {hotkey} on layer {layer}. Forward activations: {forwards_activations}. Backwards activations: {backwards_activations}. Cached by miner: {cached_activations}"
+        )
 
     async def get_activations_stats(self):
         stats = {}

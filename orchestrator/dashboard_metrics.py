@@ -1,11 +1,13 @@
-import json
-import time
-import math
-import httpx
 import asyncio
-import settings
+import json
+import math
+import time
+from typing import Callable, Optional
+
+import httpx
 from loguru import logger
-from typing import Optional, Callable
+
+import settings
 
 
 class DashboardMetricsReporter:
@@ -13,7 +15,8 @@ class DashboardMetricsReporter:
         self.base_url = settings.DASHBOARD_BASE_URL
         self.last_loss_report = 0
         self.last_miner_report = 0
-        self.activation_count = 0
+        self.activation_count = 0  # Per-merge activation count (for sample size tracking)
+        self.total_activation_count = 0  # Cumulative total that never resets
         self.sampled_activations = []
         self.client = httpx.AsyncClient(timeout=10.0)
         self.env = getattr(settings, "DASHBOARD_ENV", "prod")
@@ -21,7 +24,6 @@ class DashboardMetricsReporter:
 
         # Loss reporting buffers
         self.loss_buffer = []
-        self.perplexity_buffer = []
         self.activation_count_buffer = []
 
         # Flag to track if periodic reporting is initialized
@@ -202,24 +204,52 @@ class DashboardMetricsReporter:
     async def buffer_loss(self, loss: float, number_of_sampled_activations: int) -> None:
         """Buffer a loss for later reporting to the dashboard.
 
+        Losses are now aggregated between weight merges and sent as a single datapoint
+        when send_aggregated_loss() is called.
+
         Args:
             loss: The loss value to buffer
             number_of_sampled_activations: Number of activations this loss represents
         """
-        current_time = time.time()
+        # Validate and sanitize the loss value before buffering
+        if math.isnan(loss):
+            logger.warning("Received NaN loss value, skipping")
+            return
+        elif math.isinf(loss):
+            logger.warning(f"Received infinite loss value ({loss}), skipping")
+            return
 
         # Add new data point to buffers
         self.loss_buffer.append(float(loss))
-        self.perplexity_buffer.append(float(math.exp(loss)))
-        self.activation_count += int(number_of_sampled_activations)  # Accumulate activation count
+        self.activation_count += int(number_of_sampled_activations)  # Accumulate for this merge period
+        self.total_activation_count += int(number_of_sampled_activations)  # Cumulative total
 
-        # Only report if enough time has passed
-        if current_time - self.last_loss_report < settings.LOSS_REPORT_INTERVAL:
+    async def send_aggregated_loss(self) -> None:
+        """Send aggregated loss data to dashboard.
+
+        This should be called when weight merges occur to send the average loss
+        accumulated since the last weight merge.
+        """
+        if not self.loss_buffer:
+            logger.debug("No loss data to send to dashboard")
             return
 
-        # Calculate averages for the buffered period
-        avg_loss = sum(self.loss_buffer) / len(self.loss_buffer) if self.loss_buffer else 0.0
-        avg_perplexity = sum(self.perplexity_buffer) / len(self.perplexity_buffer) if self.perplexity_buffer else 0.0
+        current_time = time.time()  # Get current timestamp
+
+        # Calculate averages for the period between weight merges
+        avg_loss = sum(self.loss_buffer) / len(self.loss_buffer)
+
+        # Calculate perplexity safely
+        try:
+            avg_perplexity = math.exp(avg_loss)
+            # Check if perplexity calculation resulted in invalid values
+            if math.isnan(avg_perplexity) or math.isinf(avg_perplexity):
+                logger.error(f"Perplexity calculation resulted in invalid value for avg_loss {avg_loss}")
+                raise ValueError("Invalid perplexity value")
+        except OverflowError:
+            logger.error(f"Perplexity calculation overflow for avg_loss {avg_loss}")
+            raise
+
         sample_size = len(self.loss_buffer)  # Number of samples in this period
 
         # Prepare and send the aggregated payload
@@ -227,7 +257,7 @@ class DashboardMetricsReporter:
             "timestamp": int(current_time),
             "loss": float(avg_loss),
             "perplexity": float(avg_perplexity),
-            "activation_count": int(self.activation_count),
+            "activation_count": int(self.total_activation_count),  # Use cumulative total
             "sample_size": int(sample_size),
         }
 
@@ -236,7 +266,14 @@ class DashboardMetricsReporter:
             self.last_loss_report = current_time
             # Clear buffers after successful report
             self.loss_buffer = []
-            self.perplexity_buffer = []
+            # Reset per-merge activation count (but keep total_activation_count)
+            self.activation_count = 0
+            if settings.DASHBOARD_LOGS:
+                logger.info(
+                    f"Sent aggregated loss to dashboard: avg_loss={avg_loss:.4f}, avg_perplexity={avg_perplexity:.4f}, sample_size={sample_size}, total_activations={self.total_activation_count}"
+                )
+        else:
+            logger.warning("Failed to send aggregated loss to dashboard")
 
     async def report_loss(self, loss: float, number_of_sampled_activations: int) -> None:
         """Report loss metrics to the dashboard. This is now just a wrapper around buffer_loss."""

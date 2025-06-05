@@ -105,9 +105,6 @@ class BaseNeuron(BaseModel):
 
     def _clean_gpu_memory(self):
         """Force cleanup of GPU memory."""
-        logger.debug(
-            f"Miner {self.hotkey} cleaning GPU memory. memory: {torch.cuda.memory_allocated() / 1024**3:.2f}GB"
-        )
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
@@ -138,15 +135,12 @@ class BaseNeuron(BaseModel):
         # get the chunk in the metadata with the correct chunk_id
         available_chunk_ids = list(int(k) for k in metadata["sections"].keys())
         if chunk_id == "all":
-            logger.debug("DOWNLOADING ALL CHUNKS")
             chunk_start_idx = metadata["sections"][str(min(available_chunk_ids))]["start_idx"]
             chunk_end_idx = metadata["sections"][str(max(available_chunk_ids))]["end_idx"]
             chunk_start_byte = metadata["sections"][str(min(available_chunk_ids))]["start_byte"]
             chunk_end_byte = metadata["sections"][str(max(available_chunk_ids))]["end_byte"]
         else:
-            logger.debug(f"DOWNLOADING INDIVIDUAL CHUNK {chunk_id} FOR MERGING")
             chunk = metadata["sections"][str(chunk_id)]
-            logger.debug(f"CHUNK: {chunk}")
             chunk_start_idx = chunk["start_idx"]
             chunk_end_idx = chunk["end_idx"]
             chunk_start_byte = chunk["start_byte"]
@@ -171,10 +165,8 @@ class BaseNeuron(BaseModel):
             optimizer_state_data=chunk_data if data_type == "optimizer_state" else ChunkData(),
         )
         # only download the chunk we need: we want to form an s3 query which includes the start and end indices
-        logger.debug(f"DOWNLOADING CHUNK FOR MERGING, METADATA: {metadata}")
         logger.debug(f"DOWNLOADING CHUNK FOR MERGING: {partition}")
         weights = download_weights_or_optimizer_state(data_path, partition=partition, data_type=data_type)
-        logger.debug(f"DOWNLOADED CHUNK FOR MERGING, DOWNLOADED SIZE: {weights.shape}")
         return weights, metadata
 
     async def download_weights(self):
@@ -182,9 +174,6 @@ class BaseNeuron(BaseModel):
         try:
             logger.debug(f"Downloading weights for layer {self.layer} for miner {self.hotkey[:8]}")
             merged_partitions: list[Partition] = await self.api_client.get_layer_weights(layer=self.layer)
-
-            # # sort paths in ascending order of their index in the weights object
-            # weight_paths = dict(sorted(weight_paths.items(), key=lambda x: x))
 
             # Allocate memory to the full 1d tensor
             new_weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
@@ -209,24 +198,6 @@ class BaseNeuron(BaseModel):
                 shard_optimizer_state = download_weights_or_optimizer_state(
                     partition.optimizer_state_path, partition=partition, data_type="optimizer_state"
                 )
-                logger.debug(f"WEIGHTS DIMENSIONS: {weight_shard.shape}")
-                logger.debug(f"OPTIMIZER STATE DIMENSIONS: {shard_optimizer_state.shape}")
-                logger.debug(
-                    f"SHARD DIMENSIONS IDX: {partition.weight_data.chunk_end_idx - partition.weight_data.chunk_start_idx}"
-                )
-                logger.debug(
-                    f"SHARD DIMENSIONS IDX: {partition.optimizer_state_data.chunk_end_idx - partition.optimizer_state_data.chunk_start_idx}"
-                )
-                logger.debug(
-                    f"SHARD DIMENSIONS IDX: {partition.weight_data.chunk_end_idx - partition.weight_data.chunk_start_idx}"
-                )
-                logger.debug(f"REAL SHARD DIMENSIONS: {weight_shard.shape}")
-                # weight_shard = weight_shard.to(torch.float16)
-                # shard_optimizer_state = shard_optimizer_state.to(torch.float16)
-                # weight_shard = weight_shard.detach().cpu().numpy(force=True)
-                # shard_optimizer_state = shard_optimizer_state.detach().cpu().numpy(force=True)
-
-                # start_idx = metadata["start_idx"]
 
                 new_weights[partition.weight_data.chunk_start_idx : partition.weight_data.chunk_end_idx] = weight_shard
                 new_optimizer_state[
@@ -236,10 +207,6 @@ class BaseNeuron(BaseModel):
             # assign weights to self.model
             # reshape thecomplete 1D tensor into the appropriate shape
             self.weights = new_weights
-            # new_weights = torch.from_numpy(new_weights)
-            # new_weights = new_weights.to(torch.bfloat16)
-            # new_optimizer_state = torch.from_numpy(new_optimizer_state)
-            # new_optimizer_state = new_optimizer_state.to(torch.bfloat16)
             new_optimizer_state = reconstruct_optimizer_state(
                 new_optimizer_state, tensor_shapes, state_dict, self.optimizer
             )
@@ -306,14 +273,6 @@ class BaseNeuron(BaseModel):
             )
 
     async def _forward(self, input_activations: torch.Tensor):
-        # if MOCK:
-        #     await asyncio.sleep(random.random() * 0.1)
-        #     output_activations = input_activations * 2
-        #     output_activations.requires_grad_(True)
-        #     return output_activations, {}
-        # If this is not the first stage, we need to
-        # set the input activations to require gradients in order to enable
-        # the gradients of these input activations to be computed
         if self.layer is not None and self.layer > 0:
             input_activations.requires_grad_(True)
         self.model.to(DEVICE)
@@ -326,9 +285,6 @@ class BaseNeuron(BaseModel):
         activation_grads: torch.Tensor,
         state: dict,
     ):
-        # if MOCK:
-        #     await asyncio.sleep(random.random() * 0.1)
-        #     return
         # If this is the last layer, then output_activations is the loss
         if self.layer == settings.N_LAYERS - 1:
             try:
@@ -349,10 +305,6 @@ class BaseNeuron(BaseModel):
             await self.clip_gradients()
 
     async def clip_gradients(self):
-        # if MOCK:
-        #     logger.info("Mock mode enabled - skipping gradient clipping")
-        #     return
-
         if self.total_model_params is None:
             self.total_model_params = sum(p.numel() for p in self.model.parameters())
 
@@ -363,11 +315,11 @@ class BaseNeuron(BaseModel):
 
     async def _load_model(self):
         if MOCK:
-            logger.info("Mock mode enabled - skipping model load")
+            logger.info("Mock mode enabled - loading mock model")
             self.model = MockModel()
             self.model.train()
             return
-
+        logger.info(f"MODEL_SPLITS: {MODEL_SPLITS}, LAYER: {self.layer}")
         logger.info(f"Loading model from {MODEL_CFG['model_name']} with split {MODEL_SPLITS[self.layer]}")
 
         try:
@@ -401,10 +353,6 @@ class BaseNeuron(BaseModel):
         logger.info(f"Number of parameters in the model: {sum(p.numel() for p in self.model.parameters()) / 1e9}B")
 
     async def _load_optimizer(self):
-        # if MOCK:
-        #     logger.info("Mock mode enabled - skipping optimizer load")
-        #     self.model = MockModel()
-
         self.optimizer = optim.AdamW(self.model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
         add_artificial_gradients(self.model)
         self.optimizer.step()
@@ -418,10 +366,6 @@ class BaseNeuron(BaseModel):
 
         TODO: scheduler milestone should be probably dictated by the orchestrator
         """
-        # if MOCK:
-        #     logger.info("Mock mode – skipping scheduler init")
-        #     return
-
         # -------------------------------------------------------------
         # ─── hyper-parameters from settings.py ───────────────────────
         # -------------------------------------------------------------
@@ -507,10 +451,6 @@ class BaseNeuron(BaseModel):
         2. macro-cosine × micro-saw-tooth
         3. tail cosine to zero
         """
-        # if MOCK:
-        #     logger.info("MOCK mode – scheduler skipped")
-        #     return
-
         # ─── hyper-parameters from settings.py ────────────────────────────
         warm_steps = settings.LR_WARMUP_STEPS  # e.g. 3_500
         plateau_steps = settings.LR_CONST_STEPS  # e.g.   500
@@ -650,9 +590,6 @@ class BaseNeuron(BaseModel):
         logger.info(f"{self.hotkey} updating weights after {self.backwards_since_reduce} steps")
         # if not settings.MOCK:
         logger.warning(f"{self.hotkey} is stepping")
-
-        # for param in self.model.parameters():
-        #     logger.debug(f"grad: {param.grad}")
 
         self.optimizer.step()
         self.lr_scheduler.step()

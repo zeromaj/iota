@@ -50,7 +50,7 @@ class GradientValidator(BaseNeuron):
             if await validator.api_client.health_check():
                 break
             logger.warning("Orchestrator is not healthy, waiting for it to come online")
-            await asyncio.sleep(5)
+            await asyncio.sleep(5 if settings.MOCK else 30)
         validator.external_ip = requests.get("https://checkip.amazonaws.com").text.strip()
         logger.debug(f"External IP: {validator.external_ip}")
         await validator.api_client.register_validator(
@@ -224,10 +224,6 @@ class GradientValidator(BaseNeuron):
             logger.debug(
                 f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: FORWARD PASS COMPLETE: VALID: {is_valid}, SCORE: {score}, REASON: {reason}"
             )
-            # if is_valid:
-            #     self.miner_weights[self.tracked_miner] += 1
-            # else:
-            #     self.miner_weights[self.tracked_miner] = PENALTY_RATE
             return is_valid, score, reason
 
         except Exception as e:
@@ -352,10 +348,6 @@ class GradientValidator(BaseNeuron):
             similarity = torch.nn.functional.cosine_similarity(validator_flat, miner_flat, dim=1)
             passed = (similarity > COSINE_SIMILARITY_THRESHOLD).item()
 
-            # if passed:
-            #     self.miner_weights[self.tracked_miner] += 1
-            # else:
-            #     self.miner_weights[self.tracked_miner] -= PENALTY_RATE
             return passed, similarity, "passed" if passed else "failed"
 
     async def validate_weights(self, weights_path: str, metadata_path: str, optimizer_state_path: str):
@@ -527,7 +519,8 @@ class GradientValidator(BaseNeuron):
                         register_validator = False
 
                     # Get global weights from API
-                    global_weights = await self.api_client.get_global_miner_weights()
+                    global_weights: dict[int, float] = await self.api_client.get_global_miner_weights()
+                    global_weights = {int(uid): weight for uid, weight in global_weights.items()}
                 else:
                     register_validator = True
                     logger.warning("Orchestrator is not healthy, skipping weight submission")
@@ -536,7 +529,7 @@ class GradientValidator(BaseNeuron):
                 # Submit global weights to Bittensor
                 if global_weights:
                     logger.debug(f"Received global weights: {global_weights}")
-                    self.set_weights(global_weights)
+                    self.set_weights(weights=global_weights)
                 else:
                     logger.warning("No global weights received, temporarily copying weights from the chain")
                     self.set_weights(self.copy_weights_from_chain())
@@ -546,7 +539,7 @@ class GradientValidator(BaseNeuron):
             finally:
                 await asyncio.sleep(settings.WEIGHT_SUBMIT_INTERVAL)
 
-    def set_weights(self, weights: dict[str, float]):
+    def set_weights(self, weights: dict[int, float]):
         """
         Sets the validator weights to the metagraph hotkeys based on the global weights.
         """
@@ -571,12 +564,9 @@ class GradientValidator(BaseNeuron):
         try:
             # Convert global weights to tensor, Global state of scores is on the orchestrator
             scores = torch.zeros(len(self.metagraph.uids), dtype=torch.float32)
-            for hotkey, weight in weights.items():
-                if hotkey in self.metagraph.hotkeys:
-                    scores[self.metagraph.hotkeys.index(hotkey)] = weight
-                else:
-                    logger.warning(f"Hotkey {hotkey} not found in metagraph, skipping weight submission")
-                    continue
+            for uid, weight in weights.items():
+                scores[uid] = weight
+
             # Check if scores contains any NaN values
             if torch.isnan(scores).any():
                 logger.warning("Scores contain NaN values. Replacing with 0.")

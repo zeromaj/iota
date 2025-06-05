@@ -69,7 +69,6 @@ async def main_docker(hotkey: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_miners", type=int, default=1, help="Number of miners to launch")
     parser.add_argument(
         "--env",
         type=str,
@@ -85,6 +84,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.env != "local":
+        logger.info(f"Launching {args.miner_hotkey} miner in docker")
         asyncio.run(main_docker(args.miner_hotkey))
     else:
+        logger.info(f"Launching {len(settings.MINER_HOTKEYS)} miners")
         asyncio.run(main(len(settings.MINER_HOTKEYS)))

@@ -8,6 +8,7 @@ class MinerData(BaseModel):
     """Holds all data for a miner"""
 
     hotkey: str
+    uid: int | None = None
     layer: int | None = None
     status: Literal["forward", "backward", "idle"] = "idle"
     backwards_since_reset: int = 0
@@ -99,16 +100,17 @@ class MinerRegistry(BaseModel):
     def __init__(self, miner_hotkeys: List[str], **data):
         super().__init__(**data)
         for miner_hotkey in miner_hotkeys:
-            self.add_miner_to_registry(miner_hotkey)
+            self.add_miner_to_registry(miner_hotkey = miner_hotkey)
 
-    def add_miner_to_registry(self, miner_hotkey: str, layer: int | None = None) -> None:
+    def add_miner_to_registry(self, miner_hotkey: str, layer: int | None = None, uid: int | None = None) -> None:
         """Adds a miner to the registry with default values.
 
         Args:
             miner_hotkey: The hotkey of the miner
             layer: Optional layer assignment for the miner
-        """
-        miner_data = MinerData(hotkey=miner_hotkey, layer=layer)
+            uid: Optional uid assignment for the miner
+            """
+        miner_data = MinerData(hotkey=miner_hotkey, layer=layer, uid=uid)
         self.registry[miner_hotkey] = miner_data
 
     def get_miner_data(self, miner_hotkey: str) -> MinerData | None:

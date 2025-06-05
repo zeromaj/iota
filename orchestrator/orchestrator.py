@@ -1,3 +1,4 @@
+import io
 import csv
 import copy
 import time
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field, model_validator
 
 import bittensor as bt
+import numpy as np
 from bittensor_wallet.mock import get_mock_wallet
 
 from loguru import logger
@@ -37,6 +39,9 @@ from utils.bt_utils import subtensor
 from utils.metagraph_syncer import MetagraphSyncer
 from utils.shared_states import MergingPhase, MergingPhaseManager
 from utils.partitions import PartitionManager, Partition
+from utils.s3_interactions import generate_presigned_url, upload_to_bucket
+
+CHAIN_SCORES_LOCATIONS = "scores/miner_scores.json"
 
 
 class Orchestrator(BaseModel):
@@ -86,7 +91,6 @@ class Orchestrator(BaseModel):
     lock: threading.RLock = Field(default_factory=threading.RLock)
     wallet_name: Optional[str] = None
     wallet_hotkey: Optional[str] = None
-
     model_config = {"arbitrary_types_allowed": True}
 
     @model_validator(mode="after")
@@ -172,6 +176,7 @@ class Orchestrator(BaseModel):
                     for hk in deregistered_hotkeys:
                         logger.warning(f"Tracked miner {hk[:8]}... no longer exists in metagraph")
                         self.miner_registry.remove_miner_from_registry(miner_hotkey=hk)
+                        self.global_miner_scores.pop(self.miner_registry.get_miner_data(miner_hotkey=hk).uid, None)
 
                     self._update_dashboard_callback()
 
@@ -189,6 +194,8 @@ class Orchestrator(BaseModel):
         2. Checks if the miner is already registered
         3. Assigns a layer to the miner
         4. Adds the miner to the registry
+
+        Return the layer assigned to the miner.
         """
         logger.debug(f"Attempting to register miner {hotkey[:8]}...")
 
@@ -202,20 +209,31 @@ class Orchestrator(BaseModel):
                 logger.warning(f"Miner {hotkey[:8]} not found in metagraph")
                 return
 
+            # Get the uid of the miner
+            uid = self.metagraph.uids[self.metagraph.hotkeys.index(hotkey)]
+        else:
+            uid = np.random.randint(1, 255)
+
         # Check if miner is already registered
         if hotkey in self.miner_registry.get_all_miner_data().keys():
             logger.info(f"Miner {hotkey[:8]} already registered, returning already assigned layer")
             return self.miner_registry.get_miner_data(miner_hotkey=hotkey).layer
+
         try:
             # Assign a layer to the miner during registration
             layer = await self.request_layer()
-
-            self.miner_registry.add_miner_to_registry(miner_hotkey=hotkey, layer=layer)
+            self.miner_registry.add_miner_to_registry(miner_hotkey=hotkey, layer=layer, uid=uid)
 
             logger.info(f"Successfully registered miner {hotkey[:8]} (Layer: {layer})")
 
+            # Report new miner registration to dashboard immediately
+            if settings.ENABLE_DASHBOARD_REPORTING:
+                await self.update_dashboard(miner_hotkey=hotkey)
+                if settings.DASHBOARD_LOGS:
+                    logger.info(f"Reported first-time registration of miner {hotkey[:8]} to dashboard")
+
         except Exception as e:
-            logger.exception(f"Failed to register miner {hotkey[:8]}: {str(e)}")
+            logger.error(f"Failed to register miner {hotkey[:8]}: {str(e)}")
             return None
 
         return layer
@@ -292,8 +310,9 @@ class Orchestrator(BaseModel):
     async def update_status(
         self,
         hotkey: str,
-        status: Literal["forward", "backward", "idle"],
+        status: Literal["forward", "backward", "idle", "initial"],
         activation_uid: str,
+        activation_path: str | None,
     ) -> None:
         """Update the status of a miner.
 
@@ -308,9 +327,58 @@ class Orchestrator(BaseModel):
         3. Validates activations if needed
         4. Checks for merging phase conditions
         """
-        if not self.activation_store.does_activation_exist(activation_uid):
-            logger.warning(f"Activation {activation_uid} does not exist in activation store")
+        logger.debug("\n\n CALLING UPDATE STATUS \n\n")
+
+        miner = self.miner_registry.get_miner_data(miner_hotkey=hotkey)
+
+        if status == "initial" and miner.layer != 0:
+            logger.error(f"Initial status is only allowed for layer 0. Miner {hotkey[:8]} is on layer {miner.layer}")
             return
+
+        if miner.layer == 0 and status == "initial":
+            activation_path = await self.activation_store.upload_activation_to_activation_store(
+                activation_uid=activation_uid,
+                layer=miner.layer,
+                direction=status,
+                activation_path=activation_path,
+                miner_hotkey=hotkey,
+            )
+            return
+
+        if miner.layer != settings.N_LAYERS - 1 and activation_path is None:
+            logger.error("Activation path is required for non-last layer miners")
+            return
+
+        if status == "backward" and not self.activation_store.get_miner_activation(
+            layer=miner.layer, cached_activations=miner.cached_activations, hotkey=hotkey
+        ):
+            logger.warning(f"Activation {activation_uid} is not cached for miner {hotkey[:8]}")
+            return
+
+        if (
+            miner.layer != 0
+            and status == "forward"
+            and not self.activation_store.list_activations(
+                layer=miner.layer, direction="forward", include_pending=False, miner_hotkey=hotkey
+            )
+        ):
+            logger.warning(f"Activation {activation_uid} is not available for miner {hotkey[:8]}")
+            return
+
+        # Upload the activation to the activation store if this is NOT the last layer
+        if not (miner.layer == settings.N_LAYERS - 1 and status != "backward"):
+            logger.debug(f"Uploading activation {activation_uid} to activation store for miner {hotkey[:8]}")
+            activation_path = await self.activation_store.upload_activation_to_activation_store(
+                activation_uid=activation_uid,
+                layer=miner.layer,
+                direction=status,
+                activation_path=activation_path,
+                miner_hotkey=hotkey,
+            )
+            if not activation_path:
+                logger.error(f"Failed to upload activation {activation_uid} to activation store for miner {hotkey[:8]}")
+                return
+
         # Try to pick a miner for validation if this is the first run
         if self.validator_pool.get_available_validators():
             async with self.validator_init_lock:
@@ -319,9 +387,9 @@ class Orchestrator(BaseModel):
                     logger.debug("GRADIENT VALIDATOR INITIALIZED")
 
         self.miner_registry.set_miner_attribute(miner_hotkey=hotkey, attribute="status", value=status)
-        logger.debug(f"Miner {hotkey[:8]} is {status}")
 
         miner_data: MinerData = self.miner_registry.get_miner_data(miner_hotkey=hotkey)
+        logger.info(f"Miner {hotkey[:8]} is {status} on layer {miner_data.layer}")
 
         if status == "forward":
             # Check to see if the cache is full for the miner's request to avoid overflow
@@ -339,7 +407,7 @@ class Orchestrator(BaseModel):
 
             try:
                 self.miner_registry.add_to_miner_cache(miner_hotkey=hotkey, activation_uid=activation_uid)
-                logger.debug(
+                logger.info(
                     f"Added activation {activation_uid} to miner {hotkey[:8]} in layer {miner_data.layer} cache after forward pass"
                 )
             except Exception as e:
@@ -356,11 +424,10 @@ class Orchestrator(BaseModel):
                 attribute="backwards_since_reset",
                 value=backwards_since_reset,
             )
-            await self.submit_miner_scores({hotkey: 1})
 
             # Track cache removal: when a miner completes backward pass, remove activation from cache
             try:
-                self.miner_registry.remove_from_miner_cache(hotkey, activation_uid)
+                self.miner_registry.remove_from_miner_cache(miner_hotkey=hotkey, activation_uid=activation_uid)
                 logger.debug(f"Removed activation {activation_uid} from miner {hotkey[:8]} cache after backward pass")
             except Exception as e:
                 logger.warning(f"Failed to remove activation from cache for miner {hotkey[:8]}: {e}")
@@ -408,7 +475,7 @@ class Orchestrator(BaseModel):
                     for m in self.miner_registry.get_miners_in_layer(layer)
                 ]
             )
-            logger.debug(f"\n\nLAYER {layer} MERGE COUNTS:\n{counts}\n")
+            logger.info(f"\n\nLAYER {layer} MERGE COUNTS:\n{counts}\n")
 
         # Check if all miners are in the IS_TRAINING stage
         if not all([m.stage == MergingPhase.IS_TRAINING for m in self.merging_phases]):
@@ -432,10 +499,6 @@ class Orchestrator(BaseModel):
             if cleaned_sessions > 0:
                 logger.warning(f"Cleaned up {cleaned_sessions} stale weight merge sessions")
 
-        if settings.ENABLE_DASHBOARD_REPORTING:
-            # Update dashboard
-            await self.update_dashboard(miner_hotkey=hotkey)
-
         # Create the MongoDB state manager and save the current state after updating.
         if self.total_backwards % settings.UPLOAD_EVERY_N_UPDATES == 0:
             await self.save_orchestrator_state_to_db()
@@ -451,7 +514,7 @@ class Orchestrator(BaseModel):
             for m in self.miner_registry.get_all_miner_data().values()
             if m.backwards_since_reset >= settings.GLOBAL_OPTIMIZER_STEPS
         ]
-        logger.debug(
+        logger.info(
             f"{len(miners_to_merge)}/{len(self.miner_registry.get_all_miner_data())} miners to merge: {[m.hotkey[:8] for m in miners_to_merge]}"
         )
 
@@ -459,7 +522,7 @@ class Orchestrator(BaseModel):
         if len(miners_to_merge) >= settings.MINERS_REQUIRED_FOR_WEIGHT_UPLOADING * len(
             self.miner_registry.get_all_miner_data()
         ):
-            logger.debug("MINERS READY FOR MERGING. SETTING STATUS TO WEIGHTS_UPLOADING")
+            logger.info("MINERS READY FOR MERGING. SETTING STATUS TO WEIGHTS_UPLOADING")
 
             # Progress each section of the model's phase to the next phase (e.g. from NOT_MERGING to WEIGHTS_UPLOADING).
             for phase in self.merging_phases:
@@ -475,7 +538,7 @@ class Orchestrator(BaseModel):
                 session_id = self.weight_merging_metrics_collector.start_merge_session(
                     layer=layer, target_miners=layer_miners
                 )
-                logger.debug(f"Started weight merge session {session_id} for layer {layer} with miners: {layer_miners}")
+                logger.info(f"Started weight merge session {session_id} for layer {layer} with miners: {layer_miners}")
 
                 # Mark all miners in this layer as starting weight upload
                 for miner_hotkey in layer_miners:
@@ -607,7 +670,7 @@ class Orchestrator(BaseModel):
 
         recent_file = None
         for f in loss_dir.glob("losses_*.csv"):
-            if time.time() - f.stat().st_mtime < settings.LOSS_REPORT_INTERVAL:
+            if time.time() - f.stat().st_mtime < settings.MINER_REPORT_INTERVAL:
                 recent_file = f
                 break
 
@@ -841,7 +904,7 @@ class Orchestrator(BaseModel):
                     if m.backwards_since_reset >= settings.GLOBAL_OPTIMIZER_STEPS
                 ]
             )
-            logger.debug(
+            logger.info(
                 f"{len(self.miners_with_submitted_scores[layer])} out of {num_miners_with_enough_backwards} of miners in layer {layer} have submitted weights. Miners: {self.miners_with_submitted_scores[layer]}"
             )
 
@@ -903,14 +966,14 @@ class Orchestrator(BaseModel):
             return "success"
 
         except Exception as e:
-            logger.exception(f"Error merging weights: {e}")
+            logger.info(f"Error merging weights: {e}")
             # Mark session as failed
             layer = self.miner_registry.get_miner_data(hotkey).layer
             self.weight_merging_metrics_collector.update_session_status(layer, "failed", {"error": str(e)})
             return f"Exception in notify_weights_uploaded: {e}"
 
     async def notify_merged_partitions_uploaded(self, hotkey: str, partitions: list[Partition]):
-        logger.info(f"Notifying merged partitions uploaded for miner {hotkey}")
+        logger.debug(f"Notifying merged partitions uploaded for miner {hotkey}")
         layer = self.miner_registry.get_miner_data(hotkey).layer
 
         # Record partition completion in metrics and update miner status
@@ -999,6 +1062,12 @@ class Orchestrator(BaseModel):
         for miner_data in self.miner_registry.get_miners_in_layer(layer):
             self.miner_registry.update_miner_merge_status(miner_data.hotkey, "idle")
 
+        # Send aggregated loss data to dashboard after weight merge completion
+        if settings.ENABLE_DASHBOARD_REPORTING and self.dashboard_reporter:
+            await self.dashboard_reporter.send_aggregated_loss()
+            if settings.DASHBOARD_LOGS:
+                logger.info(f"Sent aggregated loss data to dashboard after layer {layer} weight merge completion")
+
     async def get_chunks_for_miner(self, hotkey: str) -> tuple[list[SubmittedWeights], list[int]]:
         """Get the chunk locations, chunk numbers, and chunk weight factor for the miner to enable
         butterfly all-reduce.
@@ -1020,10 +1089,31 @@ class Orchestrator(BaseModel):
         if self.dashboard_reporter:
             await self.dashboard_reporter.close()
 
+    def _load_saved_scores(self):
+        # Try to load previous scores from S3
+        try:
+            from utils.s3_interactions import s3_client
+
+            if s3_client:
+                response = s3_client.get_object(Bucket=settings.S3_BUCKET, Key=CHAIN_SCORES_LOCATIONS)
+                scores = json.loads(response["Body"].read())
+                logger.info(f"Loaded previous scores from S3: {CHAIN_SCORES_LOCATIONS}")
+
+                # Add scores with current timestamp
+                current_time = time.time()
+                for uid_str, score in scores.items():
+                    self.global_miner_scores[int(uid_str)].append((current_time, score))
+
+        except Exception as e:
+            logger.warning(f"Could not load previous scores from S3: {e}")
+
+        logger.success(f"Global miner scores: {self.global_miner_scores}")
+
     async def initialize(self):
         """Initialize the orchestrator and its components."""
         # Initialize base components first
         self._initialize_miner_registry()
+        self._load_saved_scores()
 
         # Initialize dashboard reporter if enabled
         if settings.ENABLE_DASHBOARD_REPORTING and settings.DASHBOARD_BASE_URL:
@@ -1058,6 +1148,9 @@ class Orchestrator(BaseModel):
                             f"Miner {loaded_miner_hotkey[:8]} not found in metagraph, removing from registry"
                         )
                         state["miner_registry"].remove_miner_from_registry(miner_hotkey=loaded_miner_hotkey)
+                        self.global_miner_scores.pop(
+                            self.miner_registry.get_miner_data(miner_hotkey=loaded_miner_hotkey).uid, None
+                        )
 
             try:
                 # Get all field names from the Pydantic model
@@ -1149,6 +1242,14 @@ class Orchestrator(BaseModel):
             cached_activations=miner_data.cached_activations,
             hotkey=hotkey,
         )
+        if not activation_response:
+            logger.error(f"No activation found for miner {hotkey}")
+            return ActivationResponse(
+                activation_uid=None,
+                direction=None,
+                activation_path=None,
+                reason="no_activation_found",
+            )
 
         # Record activation requested in metrics (only track request time)
         if activation_response.activation_uid:
@@ -1688,14 +1789,18 @@ class Orchestrator(BaseModel):
         # update global scores history
         for uid, score in scores.items():
             score_in_history = self.global_miner_scores.get(uid, [])
-            score_in_history.append((timestamp, score))
+            score_in_history.append(
+                (timestamp, score)
+            )  # This will also add it to self.global_miner_scores due to python memory reference
+
+            historical_scores = []
 
             # remove scores older than SCORE_VALIDITY_PERIOD before updating the global scores history
-            score_in_history = [
-                score for score in score_in_history if score[0] > time.time() - settings.SCORE_VALIDITY_PERIOD
-            ]
+            for historical_timestamp, historical_score in score_in_history:
+                if historical_timestamp > time.time() - settings.SCORE_VALIDITY_PERIOD:
+                    historical_scores.append((historical_timestamp, historical_score))
 
-            self.global_miner_scores[uid] = score_in_history
+            self.global_miner_scores[uid] = historical_scores
 
     async def get_global_miner_scores(self):
         """Calculate sum of scores for each miner in the last SCORE_VALIDITY_PERIOD seconds.
@@ -1704,21 +1809,42 @@ class Orchestrator(BaseModel):
             dict: Dictionary mapping miner UIDs to their sum of scores in the last SCORE_VALIDITY_PERIOD seconds
         """
         current_scores = {}
-        for hotkey in self.miner_registry.get_all_miner_data().keys():
-            current_scores[hotkey] = 1
+
+        # give a base score if you're registered with the orchestrator.
+        for miner_data in self.miner_registry.get_all_miner_data().values():
+            current_scores[miner_data.uid] = 1
 
         for uid, score_history in self.global_miner_scores.items():
             if not score_history:
                 continue
 
-            # get sum of scores for the last SCORE_VALIDITY_PERIOD seconds
-            sum_scores = sum(
-                score for timestamp, score in score_history if timestamp > time.time() - settings.SCORE_VALIDITY_PERIOD
-            )
+            # get sum of scores since it's already been filtered by time in the submit_miner_scores method
+            sum_scores = sum(score for _, score in score_history)
 
-            current_scores[uid] = sum_scores
+            # add the sum of scores to the current scores
+            if uid in current_scores:
+                current_scores[uid] += sum_scores
+            else:
+                current_scores[uid] = sum_scores
+                logger.warning(
+                    f"Miner {uid} not found in the miner_registry, but it's in the global_miner_scores... This shouldn't happen."
+                )
 
-        return current_scores
+        # Upload the current scores to the S3 bucket
+        self.upload_data_to_s3(data=current_scores, path=CHAIN_SCORES_LOCATIONS)
+        return {str(uid): score for uid, score in current_scores.items()}
+
+    def upload_data_to_s3(self, data, path: str):
+        try:
+            scores_json = json.dumps(data)
+            scores_bytes = scores_json.encode("utf-8")
+
+            # Get presigned URL and upload
+            presigned_data = generate_presigned_url(path=path)
+            buffer = io.BytesIO(scores_bytes)
+            upload_to_bucket(presigned_data, {"file": ("data", buffer)})
+        except Exception as e:
+            logger.error(f"Failed to upload miner scores to S3: {e}")
 
     def get_miners_grid_status(self) -> Dict[str, Any]:
         """Get comprehensive miner status data for grid visualization."""
@@ -1915,5 +2041,4 @@ async def initialize_orchestrator() -> Orchestrator:
     return orchestrator
 
 
-# Initialize the orchestrator
 orchestrator = asyncio.run(initialize_orchestrator())
