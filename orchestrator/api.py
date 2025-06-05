@@ -56,13 +56,13 @@ router = APIRouter(prefix="/orchestrator")
 
 
 @router.get("/global_miner_weights", response_model=dict[str, float])
-@ip_limiter.limit("7/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_global_miner_weights(request: Request):  # Required for rate limiting
     return await orchestrator.get_global_miner_scores()
 
 
 @router.post("/submit_miner_weights", response_model=dict[str, str])
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def submit_miner_weights(
     request: Request,  # Required for rate limiting
     weights: dict[str, float],
@@ -92,7 +92,7 @@ async def submit_miner_weights(
 
 
 @router.post("/register", response_model=MinerRegistrationResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def register_miner(
     request: Request,  # Required for rate limiting
     version: Annotated[str, Header(alias="Epistula-Version")],
@@ -145,7 +145,7 @@ async def register_miner(
 
 
 @router.post("/miners/status", response_model=dict)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def update_miner_status(
     request: Request,  # Required for rate limiting
     status_update: MinerStatusUpdate,
@@ -189,7 +189,7 @@ async def update_miner_status(
 
 
 @router.post("/miners/request_layer", response_model=LayerAssignmentResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def request_layer(
     request: Request,  # Required for rate limiting
     version: Annotated[str, Header(alias="Epistula-Version")],
@@ -231,13 +231,13 @@ async def request_layer(
 
 
 @router.get("/healthcheck")
-@ip_limiter.limit("1/second")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def healthcheck(request: Request):  # Required for rate limiting
     return {"status": "healthy"}
 
 
 @router.post("/miners/notify_weights_uploaded")
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def notify_weights_uploaded(
     request: Request,  # Required for rate limiting
     weights_path: str,
@@ -293,7 +293,7 @@ async def notify_weights_uploaded(
 
 
 @router.post("/miners/notify_merged_partitions_uploaded")
-@hotkey_limiter.limit("15/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def notify_merged_partitions_uploaded(
     request: Request,  # Required for rate limiting
     partitions: list[Partition],
@@ -334,7 +334,7 @@ async def get_all_losses(request: Request):  # Required for rate limiting
 
 
 @router.post("/miners/report_loss", response_model=LossReportResponse)
-@hotkey_limiter.limit("15/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def report_loss(
     request: Request,  # Required for rate limiting
     loss_report: LossReportRequest,
@@ -384,7 +384,7 @@ async def report_loss(
 
 
 @router.get("/is_merging")
-@ip_limiter.limit("1/second")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def is_merging(request: Request, layer: int):  # Required for rate limiting
     """Check if the system is currently in merging phase."""
     # Public endpoint, no authentication required
@@ -393,7 +393,7 @@ async def is_merging(request: Request, layer: int):  # Required for rate limitin
 
 
 @router.get("/get_chunks_for_miner", response_model=tuple[list[SubmittedWeights], list[int]])
-@hotkey_limiter.limit("15/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def get_chunks_for_miner(
     request: Request,  # Required for rate limiting
     version: Annotated[str, Header(alias="Epistula-Version")],
@@ -428,7 +428,7 @@ async def get_chunks_for_miner(
 
 
 @router.post("/register_validator")
-@hotkey_limiter.limit("15/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def register_validator(
     request: Request,  # Required for rate limiting
     host: str,
@@ -470,7 +470,7 @@ async def register_validator(
 
 
 @router.get("/metrics/miner_performance/{miner_hotkey}")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_miner_performance(
     request: Request, miner_hotkey: str, time_window_seconds: Optional[int] = 3600  # Required for rate limiting
 ):
@@ -479,7 +479,7 @@ async def get_miner_performance(
 
 
 @router.get("/metrics/layer_performance/{layer}")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_layer_performance(
     request: Request, layer: int, time_window_seconds: Optional[int] = 3600  # Required for rate limiting
 ):
@@ -488,28 +488,28 @@ async def get_layer_performance(
 
 
 @router.get("/metrics/dashboard")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_real_time_dashboard(request: Request):  # Required for rate limiting
     """Get real-time performance data for monitoring dashboard."""
     return orchestrator.get_real_time_performance_dashboard()
 
 
 @router.get("/metrics/weight_merging_summary")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_weight_merging_metrics_summary(request: Request):  # Required for rate limiting
     """Get a summary of weight merging metrics."""
     return orchestrator.get_weight_merging_metrics_summary()
 
 
 @router.get("/metrics/active_merge_sessions")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_active_merge_sessions(request: Request):  # Required for rate limiting
     """Get information about currently active merge sessions."""
     return orchestrator.get_active_merge_sessions()
 
 
 @router.get("/metrics/merge_performance_history")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_merge_performance_history(
     request: Request,  # Required for rate limiting
     time_window_hours: Optional[int] = 24,
@@ -568,7 +568,7 @@ async def get_merge_performance_history(
 
 
 @router.get("/metrics/historical_processing_times")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_historical_processing_times(
     request: Request,  # Required for rate limiting
     time_window_hours: Optional[int] = 24,
@@ -587,7 +587,7 @@ async def get_historical_processing_times(
 
 
 @router.get("/metrics/merge_session_timeline")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_merge_session_timeline(
     request: Request, time_window_hours: Optional[int] = 24  # Required for rate limiting
 ):
@@ -602,7 +602,7 @@ async def get_merge_session_timeline(
 
 
 @router.get("/metrics/miners_grid_status")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_miners_grid_status(request: Request):  # Required for rate limiting
     """Get comprehensive miner status data for grid visualization."""
     try:
@@ -612,7 +612,7 @@ async def get_miners_grid_status(request: Request):  # Required for rate limitin
 
 
 @router.get("/metrics/miner_detail/{miner_hotkey}")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_miner_detail(request: Request, miner_hotkey: str):  # Required for rate limiting
     """Get detailed information about a specific miner for hover display."""
     try:
@@ -622,7 +622,7 @@ async def get_miner_detail(request: Request, miner_hotkey: str):  # Required for
 
 
 @router.get("/metrics/miners_by_status")
-@ip_limiter.limit("15/minute")
+@ip_limiter.limit(settings.IP_LIMIT)
 async def get_miners_by_status(request: Request, layer: Optional[int] = None):  # Required for rate limiting
     """Get miners grouped by their current merge status."""
     try:

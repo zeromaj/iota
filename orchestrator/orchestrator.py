@@ -1216,24 +1216,29 @@ class Orchestrator(BaseModel):
         Args:
             hotkey: The hotkey of the miner
         """
+        miner_data = self.miner_registry.get_miner_data(hotkey)
+        if self.merging_phases[miner_data.layer].stage != MergingPhase.IS_TRAINING:
+            return ActivationResponse(
+                activation_uid=None,
+                direction=None,
+                activation_path=None,
+                reason="not training",
+            )
         # This is a super hacky way of doing this, but we just want to make sure miners don't idle due to being considered out of cache.
-        for miner in self.miner_registry.get_all_miner_data().values():
-            if miner.out_of_cache:
-                for activation_uid, upload_time in list(miner.cached_activations.items()):
-                    if upload_time < time.time() - settings.ACTIVATION_CACHE_TIMEOUT:
-                        self.miner_registry.remove_from_miner_cache(miner.hotkey, activation_uid)
-                        logger.warning(
-                            f"Removed activation {activation_uid} from miner {miner.hotkey[:8]} cache due to timeout, THIS SHOULDN'T REALLY BE HAPPENING"
-                        )
-        for activation in list(self.miner_registry.get_miner_data(miner_hotkey=hotkey).cached_activations.keys()):
+        if miner_data.out_of_cache:
+            for activation_uid, upload_time in list(miner_data.cached_activations.items()):
+                if upload_time < time.time() - settings.ACTIVATION_CACHE_TIMEOUT:
+                    self.miner_registry.remove_from_miner_cache(miner_data.hotkey, activation_uid)
+                    logger.warning(
+                        f"Removed activation {activation_uid} from miner {miner_data.hotkey[:8]} cache due to timeout, THIS SHOULDN'T REALLY BE HAPPENING"
+                    )
+        for activation in list(miner_data.cached_activations.keys()):
             if not await self.activation_store.is_activation_active(
-                layer=self.miner_registry.get_miner_data(miner_hotkey=hotkey).layer,
+                layer=miner_data.layer,
                 activation_uid=activation,
             ):
-                self.miner_registry.get_miner_data(miner_hotkey=hotkey).cached_activations.pop(activation)
+                miner_data.cached_activations.pop(activation)
                 logger.debug(f"Removed inactive activation {activation} from cache for miner {hotkey}")
-
-        miner_data = self.miner_registry.get_miner_data(hotkey)
 
         logger.debug(f"Getting activation for miner {hotkey} with cached activations: {miner_data.cached_activations}")
         # Find correct activation for miner

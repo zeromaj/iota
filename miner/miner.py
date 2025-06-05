@@ -322,7 +322,7 @@ class Miner(BaseNeuron):
                 return
             except Exception as e:
                 logger.exception(f"Error syncing weights: {e}")
-                asyncio.sleep(WAIT_TIME)
+                await asyncio.sleep(WAIT_TIME)
                 raise
 
         if (
