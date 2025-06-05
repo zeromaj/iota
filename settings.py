@@ -205,3 +205,6 @@ MINER_HEALTH_ENDPOINT = os.getenv("MINER_HEALTH_ENDPOINT", "/health")
 LOCAL_OPTIMIZER_STEPS = 2 if MOCK else 10
 GLOBAL_OPTIMIZER_STEPS = 2 if MOCK else 10
 BURN_FACTOR = 5  # 1-1/BurnFactor % is burned, for 5 it's 80%
+
+HOTKEY_LIMIT = "5/second" if MOCK else "7/minute"
+IP_LIMIT = f"{1*len(MINER_HOTKEYS)}/second" if MOCK else "7/minute"

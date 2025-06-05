@@ -31,6 +31,7 @@ class APIClient:
         self.max_retries = 3
         self.retry_delay = 3.0  # seconds
         self.wallet = wallet
+        self.failed_api_request = False
 
     async def __aenter__(self):
         ssl = False if settings.ORCHESTRATOR_SCHEME == "http" else True
@@ -104,7 +105,15 @@ class APIClient:
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(self.retry_delay * (attempt + 1))
                     continue
+                self.failed_api_request = True
                 raise
+            except aiohttp.ClientResponseError as e:
+                if e.status == 429:  # Rate limit status code
+                    logger.warning(f"Rate limited on request {method} {url}")
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(self.retry_delay * (attempt + 1))
+                        continue
+                    raise
             except Exception as e:
                 logger.warning(
                     f"Request for method {method} url {url} and params {kwargs} failed on attempt {attempt + 1}: {str(e)}"
@@ -112,6 +121,7 @@ class APIClient:
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(self.retry_delay * (attempt + 1))
                     continue
+                self.failed_api_request = True
                 raise
 
         raise aiohttp.ClientError(f"Failed after {self.max_retries} attempts")

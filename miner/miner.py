@@ -1,5 +1,4 @@
 import asyncio
-import random
 import time
 import uuid
 import json
@@ -28,12 +27,16 @@ from orchestrator.serializers import SubmittedWeights
 from storage.serializers import ActivationResponse
 
 
+WAIT_TIME = 5 if settings.MOCK else 15
+
+
 class Miner(BaseNeuron):
     TIMEOUT: int = settings.TIMEOUT
     epoch: int = 0
     health_app_runner: Optional[web.AppRunner] = None
     health_site: Optional[web.TCPSite] = None
     reregister_needed: bool = True
+    training: bool = True
 
     @property
     async def out_of_cache(self):
@@ -181,10 +184,18 @@ class Miner(BaseNeuron):
 
             while not settings.MOCK or time.time() - start < self.TIMEOUT:
                 try:
-                    if not await self.api_client.health_check() and not self.reregister_needed:
+                    if (
+                        self.api_client.failed_api_request
+                        and not await self.api_client.health_check()
+                        and not self.reregister_needed
+                    ):
                         logger.debug("Health check failed, reregistering")
                         self.reregister_needed = True
+                        await asyncio.sleep(10)
                         continue
+
+                    # If any of the requests failed during the loop, failed_api_request is set to True, which will trigger the miner to do a health check and reregister if needed
+                    self.api_client.failed_api_request = False
 
                     if not self.api_client:
                         logger.debug("Miner either has no api client")
@@ -262,9 +273,6 @@ class Miner(BaseNeuron):
 
                     if self.reregister_needed:
                         await asyncio.sleep(10)
-                    else:
-                        await asyncio.sleep(10 * random.random())
-
                     await self.print_status()
 
                 except Exception as e:
@@ -303,21 +311,19 @@ class Miner(BaseNeuron):
                         f"Removed activation {activation_uid} from miner {self.hotkey[:8]} cache due to timeout"
                     )
 
-        result = await self.api_client.merge_info(layer=self.layer)
-        if (
-            result.get("status") == MergingPhase.WEIGHTS_UPLOADING.value
-            or result.get("status") == MergingPhase.MINERS_MERGING_PARTITIONS.value
-        ):
+        if not self.training:
+            result = await self.api_client.merge_info(layer=self.layer)
             logger.debug(f"Miner {self.hotkey} is in the merging phase: {result}")
             # Clear cache before weight syncing
             self.saved_forward_activations.clear()
             try:
-                return await self.sync_weights(num_sections=int(result["num_sections"]))
+                await self.sync_weights(num_sections=int(result["num_sections"]))
+                self.training = True
+                return
             except Exception as e:
                 logger.exception(f"Error syncing weights: {e}")
+                asyncio.sleep(WAIT_TIME)
                 raise
-        else:
-            logger.debug(f"{self.hotkey}: Not merging weights on layer {self.layer}, phase: {result}")
 
         if (
             self.backwards_since_reduce >= settings.LOCAL_OPTIMIZER_STEPS
@@ -332,6 +338,13 @@ class Miner(BaseNeuron):
             raise Exception("Layer is not set")
 
         activation_response: ActivationResponse = await self.api_client.get_random_activation()
+        if activation_response.reason == "not training":
+            logger.warning(
+                f"Miner {self.hotkey} on layer {self.layer} is merging based on get_random_activation reason, skipping forward step"
+            )
+            await asyncio.sleep(1)
+            self.training = False
+            return
 
         if activation_response.direction is not None:
             if activation_response.direction == "forward":
@@ -410,7 +423,7 @@ class Miner(BaseNeuron):
             status_response = await self.api_client.merge_info(layer=self.layer)
             if status_response.get("status") == status.value:
                 break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.5 if settings.MOCK else 10)
 
     async def sync_weights(self, num_sections: int):
         if not self.has_layer:
