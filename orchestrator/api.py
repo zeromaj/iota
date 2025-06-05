@@ -5,7 +5,6 @@ from typing import Annotated, Optional
 from loguru import logger
 from fastapi import APIRouter, HTTPException, Header, FastAPI, Request
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from utils.bt_utils import verify_entity_type
 from utils.epistula import EpistulaHeaders, create_message_body
@@ -36,6 +35,16 @@ def get_signed_by_key(request: Request) -> str:
         pass
     # Fall back to IP address for unauthenticated endpoints
     return get_remote_address(request)
+
+
+def get_remote_address(request: Request) -> str:
+    """Get the remote address, considering forwarded headers."""
+    if "X-Forwarded-For" in request.headers:
+        # Get the first address in X-Forwarded-For, which is the client's IP
+        return request.headers["X-Forwarded-For"].split(",")[0].strip()
+    elif request.client and request.client.host:
+        return request.client.host
+    return "127.0.0.1"
 
 
 app = FastAPI()
