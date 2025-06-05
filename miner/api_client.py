@@ -7,7 +7,6 @@ from aiohttp import ClientConnectorError, ContentTypeError
 from utils.epistula import generate_header, create_message_body
 from storage.serializers import (
     ActivationDownloadRequest,
-    ActivationListRequest,
     ActivationResponse,
     ActivationUploadRequest,
     StorageResponse,
@@ -56,7 +55,7 @@ class APIClient:
             logger.exception(f"Failed to submit miner weights: {e}")
             return None
 
-    async def get_global_miner_weights(self) -> Dict[int, Any]:
+    async def get_global_miner_weights(self) -> dict[str, Any]:
         return await self._make_request("get", f"{self.base_url}/orchestrator/global_miner_weights")
 
     async def _make_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
@@ -127,8 +126,10 @@ class APIClient:
             logger.exception(f"Failed to register miner: {e}")
             raise
 
-    async def update_status(self, status: str, activation_uid: Optional[str] = None) -> Dict[str, Any]:
-        data = {"status": status}
+    async def update_status(
+        self, status: str, activation_uid: Optional[str] = None, activation_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        data = {"status": status, "activation_path": activation_path}
         if activation_uid:
             data["activation_uid"] = activation_uid
 
@@ -199,22 +200,6 @@ class APIClient:
         )
         return StorageResponse(**response)
 
-    async def list_activations(self, layer: int, direction: str, include_pending: bool = False) -> StorageResponse:
-        data = ActivationListRequest(
-            layer=layer,
-            direction=direction,
-            include_pending=include_pending,
-        )
-        response = await self._make_request("post", f"{self.base_url}/storage/activations/list", json=data.model_dump())
-        return StorageResponse(**response)
-
-    async def is_activation_ready(self, layer: int, activation_uid: str, direction: str) -> bool:
-        response = await self._make_request(
-            "get",
-            f"{self.base_url}/storage/activations/is_activation_ready?layer={layer}&activation_uid={activation_uid}&direction={direction}",
-        )
-        return response["is_ready"]
-
     async def get_random_activation(
         self,
     ) -> ActivationResponse:
@@ -265,6 +250,24 @@ class APIClient:
             json=data.model_dump(),
         )
         return response["data"]["presigned_data"]
+
+    async def register_validator(self, host: str, port: int, scheme: str = "http") -> Dict[str, Any]:
+        """Register a validator with the orchestrator."""
+        return await self._make_request(
+            "post",
+            f"{self.base_url}/orchestrator/register_validator?host={host}&port={port}&scheme={scheme}",
+        )
+
+    async def weight_partition_info(self):
+        """Get the weight partition info for a given layer."""
+        return await self._make_request("get", f"{self.base_url}/orchestrator/get_chunks_for_miner")
+
+    async def notify_merged_partitions_uploaded(self, partitions: list[Partition]):
+        return await self._make_request(
+            "post",
+            f"{self.base_url}/orchestrator/miners/notify_merged_partitions_uploaded",
+            json=[partition.model_dump() for partition in partitions],
+        )
 
     async def initiate_multipart_upload(
         self,
@@ -333,21 +336,3 @@ class APIClient:
         except Exception as e:
             logger.warning("Orchestrator failed health check!")
             return False
-
-    async def register_validator(self, host: str, port: int, scheme: str = "http") -> Dict[str, Any]:
-        """Register a validator with the orchestrator."""
-        return await self._make_request(
-            "post",
-            f"{self.base_url}/orchestrator/register_validator?host={host}&port={port}&scheme={scheme}",
-        )
-
-    async def weight_partition_info(self):
-        """Get the weight partition info for a given layer."""
-        return await self._make_request("get", f"{self.base_url}/orchestrator/get_chunks_for_miner")
-
-    async def notify_merged_partitions_uploaded(self, partitions: list[Partition]):
-        return await self._make_request(
-            "post",
-            f"{self.base_url}/orchestrator/miners/notify_merged_partitions_uploaded",
-            json=[partition.model_dump() for partition in partitions],
-        )

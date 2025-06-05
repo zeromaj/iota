@@ -1,4 +1,5 @@
 import asyncio
+import random
 import time
 import uuid
 import json
@@ -262,7 +263,7 @@ class Miner(BaseNeuron):
                     if self.reregister_needed:
                         await asyncio.sleep(10)
                     else:
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(10 * random.random())
 
                     await self.print_status()
 
@@ -395,9 +396,6 @@ class Miner(BaseNeuron):
         """
 
         await self.api_client.report_loss(activation_uid, float(loss.item()))
-        # If we are in the merging phase, we need to sync weights
-        # if result := await self.api_client.is_merging():
-        # logger.debug(f"Miner {self.uid} is in the merging phase: {result}")
         await self.local_all_reduce()
 
     async def register(self):
@@ -674,16 +672,18 @@ class Miner(BaseNeuron):
             uid=activation_uid, layer=self.layer, direction=direction, data=activations
         )
 
-        await self.api_client.upload_activation_to_orchestrator(
-            activation_uid=activation_uid,
-            layer=self.layer,
-            direction=direction,
-            activation_path=storage_path,
-        )
+        # await self.api_client.upload_activation_to_orchestrator(
+        #     activation_uid=activation_uid,
+        #     layer=self.layer,
+        #     direction=direction,
+        #     activation_path=storage_path,
+        # )
 
         logger.debug(f"Uploaded activation to path: {storage_path}")
-        if direction != "initial":
-            await self.api_client.update_status(status=direction, activation_uid=activation_uid)
+        logger.debug(f"Calling update status with direction {direction}")
+        await self.api_client.update_status(
+            status=direction, activation_uid=activation_uid, activation_path=storage_path
+        )
 
         # Clean up the activations tensor after upload
         del activations
@@ -742,13 +742,20 @@ class Miner(BaseNeuron):
                 logger.warning(f"No forward activations found for layer {self.layer}, miner {self.hotkey} is idle")
                 return
 
-            logger.debug(
-                "FORWARD: GOT RANDOM ACTIVATION | ACTIVATION UID: {} | DIRECTION: {} | MINER: {} | LAYER: {}",
-                activation_uid,
-                "forward",
-                self.hotkey,
-                self.layer,
-            )
+            if activation_uid is not None:
+                logger.debug(
+                    "FORWARD: GOT RANDOM ACTIVATION | ACTIVATION UID: {} | DIRECTION: {} | MINER: {} | LAYER: {}",
+                    activation_uid,
+                    "forward",
+                    self.hotkey,
+                    self.layer,
+                )
+            else:
+                logger.debug(
+                    "Miner is currently idle as no activatins from the previous layer are available... Waiting for other miners to upload activations"
+                )
+                return
+
             try:
                 input_activations = download_activation(path=input_activation_path)
             except Exception as e:
@@ -797,7 +804,8 @@ class Miner(BaseNeuron):
                 state,
                 time.time(),
             )
-            await self.api_client.update_status(status="forward", activation_uid=activation_uid)
+
+            await self.api_client.update_status(status="forward", activation_uid=activation_uid, activation_path=None)
 
             try:
                 await self.backward(activation=activation)
@@ -949,13 +957,6 @@ class Miner(BaseNeuron):
         # Use orchestrator-coordinated upload that automatically handles multipart for large files
         return await smart_upload_via_orchestrator_async(self.api_client, data_bytes, path)
 
-    # async def upload_optimizer_state(self, optimizer_state: dict[str, Any], miner_hotkey: str, epoch: int) -> str:
-    #     presigned_data = await self.api_client.get_presigned_url(path=f"optimizer_state/{miner_hotkey}/{epoch}/{uuid.uuid4()}.pt")
-    #     buffer = io.BytesIO()
-    #     torch.save(optimizer_state, buffer)
-    #     buffer.seek(0)
-    #     return upload_to_bucket(presigned_data, {'file': ('optimizer_state.pt', buffer)})
-
     async def create_metadata(self, weights_numpy: torch.Tensor, num_sections: int) -> dict[str, Any]:
         # Create metadata about the tensor
         tensor_metadata = {
@@ -978,7 +979,6 @@ class Miner(BaseNeuron):
             # Calculate corresponding tensor indices
             start_byte = start_idx * tensor_metadata["element_size"]
             end_byte = end_idx * tensor_metadata["element_size"]
-            # logger.info(f"Uploading section {i} from {start_idx} to {end_idx}")
 
             assert start_byte is not None and end_byte is not None, "Start byte and end byte are missing"
             assert start_idx is not None and end_idx is not None, "Start idx and end idx are missing"
@@ -988,9 +988,6 @@ class Miner(BaseNeuron):
                 "start_idx": start_idx,  # e.g for a (100,100) matrix divided into 10 sections, the indices are: 0-999. 1000 - 1999. 2000 - 2999. 3000 - 3999. 4000 - 4999. 5000 - 5999. 6000 - 6999. 7000 - 7999. 8000 - 8999. 9000 - 9999.
                 "end_idx": end_idx,
             }
-        # section_begin_indices = list(range(0, tensor_metadata["total_bytes"], section_size))
-        # if i want to download another minersweights at section 3 i can use this as a guide as it is universal
-        # for section in my_sections:
 
         # Save full tensor metadata
         full_metadata = {"tensor": tensor_metadata, "sections": sections_metadata}

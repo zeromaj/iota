@@ -15,6 +15,7 @@ class SubmittedWeights(BaseModel):
 class MinerStatusUpdate(BaseModel):
     status: Literal["forward", "backward", "initial", "idle"]
     activation_uid: str | None = None
+    activation_path: str | None = None
 
 
 class MinerRegistrationResponse(BaseModel):

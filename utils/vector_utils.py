@@ -25,7 +25,6 @@ def flatten_optimizer_state(optimizer, dtype=torch.bfloat16):
             if k == "step":
                 continue
             if isinstance(v, torch.Tensor):
-                # logger.debug(f"Tensor dtype {k}: {v.dtype}")
                 tensors.append(v.flatten().to(dtype).to(settings.DEVICE))
                 tensor_shapes.append(v.shape)
 
