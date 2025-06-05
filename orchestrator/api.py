@@ -79,7 +79,7 @@ async def submit_miner_weights(
         signed_by=signed_by,
         request_signature=request_signature,
     )
-    error = headers.verify_signature_v2(create_message_body({}), time.time())
+    error = headers.verify_signature_v2(create_message_body(weights), time.time())
     if error:
         raise HTTPException(status_code=401, detail=f"Epistula verification failed: {error}")
 
