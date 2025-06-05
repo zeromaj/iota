@@ -472,7 +472,7 @@ class GradientValidator(BaseNeuron):
         try:
             self.api_client = APIClient(self.wallet)
             await self.api_client.__aenter__()
-            self.miner_weights = {int(uid): float(weight) for uid, weight in self.miner_weights.items()}
+            self.miner_weights = {uid: float(weight) for uid, weight in self.miner_weights.items()}
             await self.api_client.submit_miner_weights(weights=self.miner_weights)
             self.available = True
             self.tracked_miner = None
