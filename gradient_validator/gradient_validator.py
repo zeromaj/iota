@@ -564,8 +564,9 @@ class GradientValidator(BaseNeuron):
         try:
             # Convert global weights to tensor, Global state of scores is on the orchestrator
             scores = torch.zeros(len(self.metagraph.uids), dtype=torch.float32)
-            for uid, weight in weights.items():
-                scores[uid] = weight
+            for hotkey, weight in weights.items():
+                miner_uid = self.metagraph.hotkeys.index(hotkey)
+                scores[miner_uid] = weight
 
             # Check if scores contains any NaN values
             if torch.isnan(scores).any():
