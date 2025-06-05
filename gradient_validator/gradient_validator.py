@@ -527,12 +527,12 @@ class GradientValidator(BaseNeuron):
                     global_weights = {}
 
                 # Submit global weights to Bittensor
-                if global_weights:
+                if len(global_weights) > 0:
                     logger.debug(f"Received global weights: {global_weights}")
                     self.set_weights(weights=global_weights)
                 else:
                     logger.warning("No global weights received, temporarily copying weights from the chain")
-                    self.set_weights(self.copy_weights_from_chain())
+                    self.set_weights(weights=self.copy_weights_from_chain())
 
             except Exception as e:
                 logger.exception(f"Error in weight loop: {e}")
@@ -617,7 +617,12 @@ class GradientValidator(BaseNeuron):
         except Exception as e:
             logger.exception(f"Error submitting weights to Bittensor: {e}")
 
-    def copy_weights_from_chain(self):
+    def copy_weights_from_chain(self) -> dict[int, float]:
+        """Copy weights from the chain to the validator.
+
+        Returns:
+            dict[int, float]: A dictionary of weights for each miner.
+        """
         meta = self.subtensor.metagraph(netuid=int(settings.netuid), lite=False)
         valid_indices = np.where(meta.validator_permit)[0]
         valid_weights = meta.weights[valid_indices]
