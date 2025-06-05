@@ -15,6 +15,7 @@ if not load_dotenv(dotenv_path=DOTENV_PATH):
 # Model
 TOKENIZER_NAME = "meta-llama/Llama-3.2-1B"
 PRETRAINED = False
+
 MODEL_CFG = LLAMA32_CONFIG_15B
 
 # Bittensor
@@ -49,18 +50,9 @@ MINERS_REQUIRED_FOR_WEIGHT_UPLOADING = 0.7
 
 # swarm
 MINERS_PER_LAYER = 1
-# MODEL_SPLITS = [[-1, -1]]
-# MODEL_SPLITS = [[-1, 8], [8, -1]]
 # MODEL_SPLITS = [[-1, 5], [5, 10], [10, -1]]  # For 1B models
 # MODEL_SPLITS = [[-1, 3], [3, -1]]  # For 100M models 2 layers
 # MODEL_SPLITS = [[-1, 2], [2, 4], [4, -1]]  # For 100M models 3 layers
-# MODEL_SPLITS = [[-1, 4], [4, 8], [8, 12], [12, -1]]
-# MODEL_SPLITS = [[-1, -1]]
-# MODEL_SPLITS = [[-1, 8], [8, -1]]
-# MODEL_SPLITS = [[-1, 4], [4, 8], [8, 12], [12, -1]]
-# MODEL_SPLITS = [[-1, 1], [1, 3], [3, 5], [5, 7], [7, 9],
-#                 [9, 11], [11, 13], [13, 15], [15, -1]]
-
 # MODEL_SPLITS = [[-1, 9], [9, 19], [19, -1]] # For 3B models
 # MODEL_SPLITS = [[-1, 11], [11, 27], [27, -1]]  # For 12B models
 MODEL_SPLITS = [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]]  # 15B
@@ -88,7 +80,7 @@ ORCHESTRATOR_URL = f"{ORCHESTRATOR_SCHEME}://{ORCHESTRATOR_HOST}:{ORCHESTRATOR_P
 
 # S3
 S3_BUCKET = os.getenv("S3_BUCKET")
-USE_S3 = os.getenv("USE_S3", True) # always use it if not specified
+USE_S3 = os.getenv("USE_S3", True)  # always use it if not specified
 
 
 # Epistula
@@ -131,6 +123,7 @@ while len(VALIDATOR_PORTS) < VALIDATOR_COUNT:
 # CONFIG
 LOSSES_DIR = os.getenv("LOSSES_DIR", "losses")
 ACTIVATION_DIR = os.getenv("ACTIVATION_DIR", "activation_cache")
+DEFAULT_API_BASE_URL = os.getenv("DEFAULT_API_BASE_URL", "http://localhost:8000")
 MINER_REGISTRY_PATH = "./miner_registry.pkl"
 
 if MOCK:
@@ -145,7 +138,7 @@ netuid = int(os.getenv("netuid", "9"))
 __spec_version__ = 4062
 # ==============================================
 # DASHBOARD
-DASHBOARD_BASE_URL = os.getenv("DASHBOARD_BASE_URL", "https://staging-swarm-dash-backend-kcsi.encr.app")
+DASHBOARD_BASE_URL = os.getenv("DASHBOARD_BASE_URL", "https://swarm.api.macrocosmos.ai/")
 DASHBOARD_ACCESS_KEY = os.getenv("DASHBOARD_ACCESS_KEY")
 ENABLE_DASHBOARD_REPORTING = os.getenv("ENABLE_DASHBOARD_REPORTING", "True") == "True"
 
@@ -159,7 +152,6 @@ if ENABLE_DASHBOARD_REPORTING:
 else:
     DASHBOARD_BASE_URL = None
 
-LOSS_REPORT_INTERVAL = 60  # seconds
 MINER_REPORT_INTERVAL = 180  # 3 minutes in seconds
 MINER_ACTIVITY_TIMEOUT = (
     3600  # 1 hour in seconds - time after which a miner is considered inactive and its node changes in frontend
@@ -168,7 +160,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 1  # seconds
 # ==============================================
 logger.info(
-    f"Settings: \n{DOTENV_PATH=}\n{BITTENSOR=}\n{VALIDATE=}\n{MOCK=}\n{ORCHESTRATOR_URL=}\n{VALIDATOR_COUNT=}\n{VALIDATOR_HOSTS=}\n{VALIDATOR_PORTS=}\n{WEIGHT_SUBMIT_INTERVAL=}\n{COSINE_SIMILARITY_THRESHOLD=}\n{ACTIVATION_MAGNITUDE_THRESHOLD=}\n{WEIGHT_MAGNITUDE_THRESHOLD=}\n{DASHBOARD_BASE_URL=}\n{ENABLE_DASHBOARD_REPORTING=}\n{LOSS_REPORT_INTERVAL=}\n{MINER_REPORT_INTERVAL=}\n{MINER_ACTIVITY_TIMEOUT=}\n{MAX_RETRIES=}\n{RETRY_DELAY=}\n{netuid=}\n{__spec_version__=}\n{DASHBOARD_ENV=}\n{DASHBOARD_LOGS=}"
+    f"Settings: \n{DOTENV_PATH=}\n{BITTENSOR=}\n{VALIDATE=}\n{MOCK=}\n{ORCHESTRATOR_URL=}\n{VALIDATOR_COUNT=}\n{VALIDATOR_HOSTS=}\n{VALIDATOR_PORTS=}\n{WEIGHT_SUBMIT_INTERVAL=}\n{COSINE_SIMILARITY_THRESHOLD=}\n{ACTIVATION_MAGNITUDE_THRESHOLD=}\n{WEIGHT_MAGNITUDE_THRESHOLD=}\n{DASHBOARD_BASE_URL=}\n{ENABLE_DASHBOARD_REPORTING=}\n{MINER_REPORT_INTERVAL=}\n{MINER_ACTIVITY_TIMEOUT=}\n{MAX_RETRIES=}\n{RETRY_DELAY=}\n{netuid=}\n{__spec_version__=}\n{DASHBOARD_ENV=}\n{DASHBOARD_LOGS=}"
 )
 
 # Weights & Biases
@@ -205,3 +197,6 @@ MINER_HEALTH_ENDPOINT = os.getenv("MINER_HEALTH_ENDPOINT", "/health")
 LOCAL_OPTIMIZER_STEPS = 2 if MOCK else 10
 GLOBAL_OPTIMIZER_STEPS = 2 if MOCK else 10
 BURN_FACTOR = 5  # 1-1/BurnFactor % is burned, for 5 it's 80%
+
+HOTKEY_LIMIT = "5/second" if MOCK else "7/minute"
+IP_LIMIT = f"{1*len(MINER_HOTKEYS)}/second" if MOCK else "7/minute"

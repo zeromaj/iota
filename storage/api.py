@@ -62,7 +62,7 @@ router = APIRouter(prefix="/storage")
 
 # Activation Storage Endpoints
 @router.post("/activations/upload", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def upload_activation_to_orchestrator(
     request: Request,  # Required for rate limiting
     activation_request: ActivationUploadRequest,
@@ -134,7 +134,7 @@ async def upload_activation_to_orchestrator(
 
 
 @router.post("/activations/download", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def download_activation(
     request: Request,  # Required for rate limiting
     activation_request: ActivationDownloadRequest,
@@ -203,7 +203,7 @@ async def download_activation(
 
 
 @router.post("/activations/random", response_model=ActivationResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def get_random_activation(
     request: Request,  # Required for rate limiting
     version: Annotated[str, Header(alias="Epistula-Version")],
@@ -256,7 +256,7 @@ async def get_random_activation(
 
 
 @router.get("/activations/stats", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def get_activation_stats(
     request: Request,  # Required for rate limiting
     version: Annotated[str, Header(alias="Epistula-Version")],
@@ -305,7 +305,7 @@ async def get_activation_stats(
 
 
 @router.get("/activations/is_active")
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def is_activation_active(
     request: Request,  # Required for rate limiting
     layer: int,
@@ -351,7 +351,7 @@ async def is_activation_active(
 
 
 @router.get("/weights/{miner_hotkey}", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def get_weights(
     request: Request,  # Required for rate limiting
     miner_hotkey: str,
@@ -400,7 +400,7 @@ async def get_weights(
 
 
 @router.get("/weights/list", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def list_miners(
     request: Request,  # Required for rate limiting
     version: Annotated[str, Header(alias="Epistula-Version")],
@@ -449,7 +449,7 @@ async def list_miners(
 
 
 @router.delete("/weights", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def delete_weights(
     request: Request,  # Required for rate limiting
     version: Annotated[str, Header(alias="Epistula-Version")],
@@ -498,7 +498,7 @@ async def delete_weights(
 
 
 @router.post("/weights/set_layer_weights", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def set_layer_weights(
     request: Request,  # Required for rate limiting
     weight_request: WeightLayerRequest,
@@ -550,7 +550,7 @@ async def set_layer_weights(
 
 
 @router.get("/weights/layer/{layer}", response_model=list[Partition])
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def get_layer_weights(
     request: Request,  # Required for rate limiting
     layer: int,
@@ -603,7 +603,7 @@ async def get_layer_weights(
 
 
 @router.get("/presigned_url", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def get_presigned_url(
     request: Request,  # Required for rate limiting
     data: PresignedUrlRequest,
@@ -673,7 +673,7 @@ async def get_presigned_url(
 
 
 @router.post("/multipart_upload/initiate", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def initiate_multipart_upload(
     request: Request,  # Required for rate limiting
     upload_request: MultipartUploadRequest,
@@ -769,7 +769,7 @@ async def initiate_multipart_upload(
 
 
 @router.post("/multipart_upload/complete", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def complete_multipart_upload_endpoint(
     request: Request,  # Required for rate limiting
     complete_request: CompleteMultipartUploadRequest,
@@ -819,7 +819,7 @@ async def complete_multipart_upload_endpoint(
 
 
 @router.post("/multipart_upload/abort", response_model=StorageResponse)
-@hotkey_limiter.limit("7/minute")
+@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
 async def abort_multipart_upload_endpoint(
     request: Request,  # Required for rate limiting
     abort_request: AbortMultipartUploadRequest,
