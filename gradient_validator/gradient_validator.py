@@ -580,13 +580,13 @@ class GradientValidator(BaseNeuron):
             # Normalize weights
             raw_weights = torch.nn.functional.normalize(scores, p=1, dim=0)
 
-            if settings.BURN_FACTOR > 1 and settings.netuid == 9:
+            if settings.BURN_FACTOR > 1 and settings.netuid == 9 and raw_weights[209] < (1 - 1 / settings.BURN_FACTOR):
                 # Divide the raw_weights by settings.burn_factor before further processing
                 raw_weights = raw_weights / settings.BURN_FACTOR
 
                 # Add the 1-1/burn factor to the 209th uid
                 if len(raw_weights) > 209:  # 209 is the owner hotkey of sn9
-                    raw_weights[209] += 1 - 1 / settings.BURN_FACTOR
+                    raw_weights[209] = 1 - 1 / settings.BURN_FACTOR
 
             # Process the raw weights to final_weights via subtensor limitations
             (

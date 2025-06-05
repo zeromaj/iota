@@ -26,7 +26,7 @@ def cleanup_activation_cache():
         if os.path.exists(LOG_FILE):
             os.remove(LOG_FILE)
     except Exception as e:
-        logger.error(f"Error cleaning up activation cache: {e}")
+        logger.exception(f"Error cleaning up activation cache: {e}")
 
 
 def _log_operation(
@@ -37,44 +37,45 @@ def _log_operation(
     response: list[str] = None,
     miner_hotkey: str = None,
 ):
+    pass
     # Read existing rows
-    rows = []
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r") as f:
-            reader = csv.reader(f)
-            next(reader)  # Skip header
-            rows = list(reader)
+    # rows = []
+    # if os.path.exists(LOG_FILE):
+    #     with open(LOG_FILE, "r") as f:
+    #         reader = csv.reader(f)
+    #         next(reader)  # Skip header
+    #         rows = list(reader)
 
-    # Add new row
-    rows.append(
-        [
-            time.time(),
-            operation,
-            activation_uid,
-            layer,
-            direction,
-            response,
-            miner_hotkey,
-        ]
-    )
+    # # Add new row
+    # rows.append(
+    #     [
+    #         time.time(),
+    #         operation,
+    #         activation_uid,
+    #         layer,
+    #         direction,
+    #         response,
+    #         miner_hotkey,
+    #     ]
+    # )
 
-    # Keep only last MAX_LOG_ROWS
-    rows = rows[-MAX_LOG_ROWS:]
+    # # Keep only last MAX_LOG_ROWS
+    # rows = rows[-MAX_LOG_ROWS:]
 
-    # Write back to file
-    with open(LOG_FILE, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(
-            [
-                "timestamp",
-                "operation",
-                "activation_uid",
-                "layer",
-                "direction",
-                "response",
-            ]
-        )
-        writer.writerows(rows)
+    # # Write back to file
+    # with open(LOG_FILE, "w", newline="") as f:
+    #     writer = csv.writer(f)
+    #     writer.writerow(
+    #         [
+    #             "timestamp",
+    #             "operation",
+    #             "activation_uid",
+    #             "layer",
+    #             "direction",
+    #             "response",
+    #         ]
+    #     )
+    #     writer.writerows(rows)
 
 
 class ActivationState(str, Enum):
