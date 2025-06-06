@@ -544,6 +544,7 @@ class Miner(BaseNeuron):
 
         # Clean GPU memory only after weight sync completes
         logger.debug(f"Miner {self.hotkey[:8]} cleaning GPU memory after weight sync completion")
+        self._clean_gpu_memory()
 
     async def _merge_models(
         self, information_packets: list[SubmittedWeights], partition_ids: list[int]

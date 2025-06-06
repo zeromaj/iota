@@ -100,16 +100,20 @@ class PartitionManager(BaseModel):
         miner_hotkeys = list(submitted_weights.keys())
 
         for miner_hotkey, submitted_weight in submitted_weights.items():
-            self.original_weight_paths[layer].append(
-                SubmittedWeights(
-                    weights_path=submitted_weight[0],
-                    weight_metadata_path=submitted_weight[1],
-                    optimizer_state_path=submitted_weight[2],
-                    optimizer_state_metadata_path=submitted_weight[3],
-                    hotkey=miner_hotkey,
-                    weighting_factor=1 + registry.get_miner_data(miner_hotkey).backwards_since_reset,
+            try:
+                self.original_weight_paths[layer].append(
+                    SubmittedWeights(
+                        weights_path=submitted_weight[0],
+                        weight_metadata_path=submitted_weight[1],
+                        optimizer_state_path=submitted_weight[2],
+                        optimizer_state_metadata_path=submitted_weight[3],
+                        hotkey=miner_hotkey,
+                        weighting_factor=1 + registry.get_miner_data(miner_hotkey).backwards_since_reset,
+                    )
                 )
-            )
+            except Exception as e:
+                logger.warning(f"Error adding submitted weights for miner {miner_hotkey}: {e}")
+                continue
 
         pairs = assign_cells_to_pairs(miner_hotkeys=miner_hotkeys)
         randomize_order = [0, 1]
