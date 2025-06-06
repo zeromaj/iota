@@ -26,7 +26,7 @@ from settings import (
     VALIDATE,
     WEIGHT_MAGNITUDE_THRESHOLD,
 )
-from storage.serializers import StorageResponse
+from storage.serializers import StorageResponse, ValidationEvent
 from utils.s3_interactions import download_activation, download_weights_or_optimizer_state
 from utils.vector_utils import flatten_optimizer_state
 
@@ -39,6 +39,7 @@ class GradientValidator(BaseNeuron):
     weight_version: str | None = None
     miner_weights: dict[int, float] = {}
     external_ip: str | None = None
+    validation_events: list[ValidationEvent] = []
 
     @classmethod
     async def create(cls):
@@ -212,7 +213,7 @@ class GradientValidator(BaseNeuron):
 
             # Validate and store results
             is_valid, score, reason = await self.validate_activations(
-                validator_activations, miner_activations.to(DEVICE), direction="forward"
+                validator_activations, miner_activations.to(DEVICE), direction="forward", activation_uid=activation_uid
             )
             self.processed_forward_activations.append(activation_uid)
             self.saved_forward_activations[activation_uid] = (
@@ -288,6 +289,7 @@ class GradientValidator(BaseNeuron):
                 validator_activations=input_activation_grads,
                 miner_activations=miner_activations.to(DEVICE),
                 direction="backward",
+                activation_uid=activation_uid,
             )
             del self.saved_forward_activations[activation_uid]
             self.processed_backward_activations.append(activation_uid)
@@ -306,6 +308,7 @@ class GradientValidator(BaseNeuron):
         validator_activations: torch.Tensor,
         miner_activations: torch.Tensor,
         direction: Literal["forward", "backward"],
+        activation_uid: str | None = None,
     ) -> tuple[bool, torch.Tensor, str]:
         """
         Validate the activations of the miner against the validator's activations.
@@ -317,27 +320,59 @@ class GradientValidator(BaseNeuron):
         validator_flat = validator_activations.flatten().to(DEVICE)
         miner_flat = miner_activations.flatten().to(DEVICE)
 
+        # Calculate norms for logging
+        validator_norm = torch.norm(validator_flat).item()
+        miner_norm = torch.norm(miner_flat).item()
+
         if MOCK:
             # In mock mode, use simple cosine similarity
             validator_flat = validator_flat.unsqueeze(0)
             miner_flat = miner_flat.unsqueeze(0)
             similarity = torch.nn.functional.cosine_similarity(validator_flat, miner_flat, dim=1)
             passed = (similarity > COSINE_SIMILARITY_THRESHOLD).item()
-            return passed, similarity, "passed" if passed else "failed"
+            score = similarity.item() if similarity.numel() == 1 else similarity[0].item()
+            reason = "passed" if passed else "failed"
+
+            # Log validation event
+            self._log_validation_event(
+                event_type="activation_validation",
+                direction=direction,
+                activation_uid=activation_uid,
+                success=passed,
+                score=score,
+                reason=reason,
+                validator_norm=validator_norm,
+                miner_norm=miner_norm,
+                magnitude_ratio=None,
+            )
+
+            return passed, similarity, reason
         else:
             # Step 1: Magnitude ratio check (gatekeeper)
             # R(v, m) = min(||v||, ||m||) / (max(||v||, ||m||) + ε)
-            validator_norm = torch.norm(validator_flat)
-            miner_norm = torch.norm(miner_flat)
-
             eps = 1e-8
-            magnitude_ratio = torch.min(validator_norm, miner_norm) / (torch.max(validator_norm, miner_norm) + eps)
+            magnitude_ratio = torch.min(torch.tensor(validator_norm), torch.tensor(miner_norm)) / (
+                torch.max(torch.tensor(validator_norm), torch.tensor(miner_norm)) + eps
+            )
+            magnitude_ratio_value = magnitude_ratio.item()
 
-            if magnitude_ratio < ACTIVATION_MAGNITUDE_THRESHOLD:
+            if magnitude_ratio_value < ACTIVATION_MAGNITUDE_THRESHOLD:
                 logger.warning(
                     f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: MAGNITUDE CHECK FAILED - "
-                    f"ratio: {magnitude_ratio:.4f}, validator_norm: {validator_norm:.4f}, "
+                    f"ratio: {magnitude_ratio_value:.4f}, validator_norm: {validator_norm:.4f}, "
                     f"miner_norm: {miner_norm:.4f}, direction: {direction}"
+                )
+                # Log validation event
+                self._log_validation_event(
+                    event_type="activation_validation",
+                    direction=direction,
+                    activation_uid=activation_uid,
+                    success=False,
+                    score=magnitude_ratio_value,
+                    reason="magnitude-ratio-failed",
+                    validator_norm=validator_norm,
+                    miner_norm=miner_norm,
+                    magnitude_ratio=magnitude_ratio_value,
                 )
                 # self.miner_weights[self.tracked_miner] -= PENALTY_RATE
                 return False, magnitude_ratio, "magnitude-ratio-failed"
@@ -347,8 +382,101 @@ class GradientValidator(BaseNeuron):
             miner_flat = miner_flat.unsqueeze(0)
             similarity = torch.nn.functional.cosine_similarity(validator_flat, miner_flat, dim=1)
             passed = (similarity > COSINE_SIMILARITY_THRESHOLD).item()
+            score = similarity.item() if similarity.numel() == 1 else similarity[0].item()
+            reason = "passed" if passed else "failed"
 
-            return passed, similarity, "passed" if passed else "failed"
+            # Log validation event
+            self._log_validation_event(
+                event_type="activation_validation",
+                direction=direction,
+                activation_uid=activation_uid,
+                success=passed,
+                score=score,
+                reason=reason,
+                validator_norm=validator_norm,
+                miner_norm=miner_norm,
+                magnitude_ratio=magnitude_ratio_value,
+            )
+
+            return passed, similarity, reason
+
+    def _log_validation_event(
+        self,
+        event_type: str,
+        success: bool,
+        score: float,
+        reason: str,
+        direction: str | None = None,
+        activation_uid: str | None = None,
+        validator_norm: float | None = None,
+        miner_norm: float | None = None,
+        magnitude_ratio: float | None = None,
+    ):
+        """Log a validation event for later analysis"""
+        # tracked_miner is now the hotkey directly
+        miner_hotkey = self.tracked_miner
+
+        event = ValidationEvent(
+            timestamp=time.time(),
+            event_type=event_type,
+            miner_hotkey=miner_hotkey,
+            layer=getattr(self, "layer", None),
+            direction=direction,
+            activation_uid=activation_uid,
+            success=success,
+            score=score,
+            reason=reason,
+            validator_norm=validator_norm,
+            miner_norm=miner_norm,
+            magnitude_ratio=magnitude_ratio,
+        )
+
+        self.validation_events.append(event)
+        logger.debug(f"Logged validation event: {event.event_type}, success: {event.success}, score: {event.score:.4f}")
+
+    async def _save_validation_events(self):
+        """Save validation events to a JSONL file for analysis"""
+        if not self.validation_events:
+            logger.debug("No validation events to save")
+            return
+
+        # Create directory if it doesn't exist
+        os.makedirs("validation_events", exist_ok=True)
+
+        # Generate filename with timestamp and miner info
+        timestamp = time.time()
+        miner_info = f"_miner_{self.tracked_miner[:8]}" if self.tracked_miner is not None else ""
+        filename = f"validation_events_{timestamp}{miner_info}.jsonl"
+        filepath = os.path.join("validation_events", filename)
+
+        try:
+            with open(filepath, "w") as f:
+                for event in self.validation_events:
+                    # Convert event to dict using Pydantic's model_dump
+                    event_dict = event.model_dump()
+                    # Write as JSON line
+                    f.write(json.dumps(event_dict) + "\n")
+
+            logger.info(f"Saved {len(self.validation_events)} validation events to {filepath}")
+
+            # Log summary statistics
+            total_events = len(self.validation_events)
+            successful_events = sum(1 for event in self.validation_events if event.success)
+            failed_events = total_events - successful_events
+
+            # Group by event type
+            event_types = {}
+            for event in self.validation_events:
+                event_types[event.event_type] = event_types.get(event.event_type, 0) + 1
+
+            logger.info(
+                f"Validation summary: {total_events} total events, "
+                f"{successful_events} successful, {failed_events} failed. "
+                f"Types: {event_types}"
+            )
+
+        except Exception as e:
+            logger.exception(f"Error saving validation events: {e}")
 
     async def validate_weights(self, weights_path: str, metadata_path: str, optimizer_state_path: str):
         if not MOCK:
@@ -371,6 +499,13 @@ class GradientValidator(BaseNeuron):
             passed, similarity, reason = await self.validate_optimizer_state(
                 own_optimizer_tensor, miner_optimizer_state
             )
+
+            # Log optimizer validation event
+            similarity_score = similarity.item() if hasattr(similarity, "item") else float(similarity)
+            self._log_validation_event(
+                event_type="optimizer_validation", success=passed, score=similarity_score, reason=reason
+            )
+
             logger.debug(
                 f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: VALIDATING OPTIMIZER STATE: {passed}, similarity: {similarity}, reason: {reason}"
             )
@@ -389,13 +524,26 @@ class GradientValidator(BaseNeuron):
 
             eps = 1e-8
             magnitude_ratio = torch.min(validator_norm, miner_norm) / (torch.max(validator_norm, miner_norm) + eps)
+            magnitude_ratio_value = magnitude_ratio.item()
 
-            if magnitude_ratio < WEIGHT_MAGNITUDE_THRESHOLD:
+            if magnitude_ratio_value < WEIGHT_MAGNITUDE_THRESHOLD:
                 logger.warning(
                     f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: WEIGHT MAGNITUDE CHECK FAILED - "
-                    f"ratio: {magnitude_ratio:.4f}, validator_norm: {validator_norm:.4f}, "
+                    f"ratio: {magnitude_ratio_value:.4f}, validator_norm: {validator_norm:.4f}, "
                     f"miner_norm: {miner_norm:.4f}"
                 )
+
+                # Log weight validation event for magnitude failure
+                self._log_validation_event(
+                    event_type="weight_validation",
+                    success=False,
+                    score=magnitude_ratio_value,
+                    reason="weight-magnitude-ratio-failed",
+                    validator_norm=validator_norm.item(),
+                    miner_norm=miner_norm.item(),
+                    magnitude_ratio=magnitude_ratio_value,
+                )
+
                 self.miner_weights[self.tracked_miner] -= PENALTY_RATE
                 return False, magnitude_ratio, "weight-magnitude-ratio-failed"
 
@@ -406,6 +554,19 @@ class GradientValidator(BaseNeuron):
                 dim=1,
             ).item()
             passed = similarity > COSINE_SIMILARITY_THRESHOLD
+            reason = "passed" if passed else "failed"
+
+            # Log weight validation event
+            self._log_validation_event(
+                event_type="weight_validation",
+                success=passed,
+                score=similarity,
+                reason=reason,
+                validator_norm=validator_norm.item(),
+                miner_norm=miner_norm.item(),
+                magnitude_ratio=magnitude_ratio_value,
+            )
+
             logger.debug(
                 f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: WEIGHT VALIDATION - "
                 f"magnitude_ratio: {magnitude_ratio}, cosine_similarity: {similarity}, passed: {passed}"
@@ -416,9 +577,13 @@ class GradientValidator(BaseNeuron):
             else:
                 self.miner_weights[self.tracked_miner] -= PENALTY_RATE
 
-            return passed, similarity, "passed" if passed else "failed"
+            return passed, similarity, reason
         else:
             logger.warning(f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: VALIDATING WEIGHTS IN MOCK MODE")
+
+            # Log weight validation event for mock mode
+            self._log_validation_event(event_type="weight_validation", success=True, score=1.0, reason="mock-mode")
+
             self.miner_weights[self.tracked_miner] += 1
             return True, 1.0, "mock-mode"
 
@@ -470,10 +635,19 @@ class GradientValidator(BaseNeuron):
         """Enhanced reset that clears metagraph-related state."""
         logger.debug("GRADIENT VALIDATOR: RESET VALIDATOR")
         try:
+            # Save validation events to file before resetting
+            await self._save_validation_events()
+
             self.api_client = APIClient(self.wallet)
             await self.api_client.__aenter__()
-            self.miner_weights = {uid: float(weight) for uid, weight in self.miner_weights.items()}
-            await self.api_client.submit_miner_weights(weights=self.miner_weights)
+
+            # The orchestrator tracks all the miner weights in uid space, but in the validator, we use self.tracked_miner which is a hotkey.
+            hotkey_to_uid = {hotkey: str(uid) for hotkey, uid in zip(self.metagraph.hotkeys, self.metagraph.uids)}
+            miner_weights: dict[str, float] = {
+                hotkey_to_uid[hotkey]: float(weight) for hotkey, weight in self.miner_weights.items()
+            }
+
+            await self.api_client.submit_miner_weights(weights=miner_weights)
             self.available = True
             self.tracked_miner = None
             self.layer = None
@@ -484,6 +658,8 @@ class GradientValidator(BaseNeuron):
             self.miner_weights = {}
             self.model = None
             self.optimizer = None
+            # Clear validation events after saving
+            self.validation_events = []
         except Exception as e:
             logger.exception(f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: Error resetting validator: {e}")
 

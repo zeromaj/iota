@@ -89,3 +89,20 @@ class CompleteMultipartUploadRequest(BaseModel):
 class AbortMultipartUploadRequest(BaseModel):
     path: str
     upload_id: str
+
+
+class ValidationEvent(BaseModel):
+    """Pydantic model for tracking validation events for analysis"""
+
+    timestamp: float
+    event_type: Literal["activation_validation", "weight_validation", "optimizer_validation"]
+    miner_hotkey: str | None = None
+    layer: int | None = None
+    direction: Literal["forward", "backward"] | None = None
+    activation_uid: str | None = None
+    success: bool
+    score: float
+    reason: str
+    validator_norm: float | None = None
+    miner_norm: float | None = None
+    magnitude_ratio: float | None = None
