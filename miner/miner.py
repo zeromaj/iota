@@ -916,8 +916,6 @@ class Miner(BaseNeuron):
 
         # Remove from cache
         del self.saved_forward_activations[activation.activation_uid]
-        self.backwards_since_reduce += 1
-        self.backwards_since_sync += 1
 
         # Handle different cases for input activation gradients
         if settings.MOCK:
@@ -927,7 +925,13 @@ class Miner(BaseNeuron):
             # Get the embedding layer weight grads instead of the input activations grads
             # This is because input activation grads of the first layer do not exist.
             emb_weight = self.model.tok_emb.weight
-            input_activation_grads = emb_weight.grad[: settings.SEQUENCE_LENGTH]
+            grad_size = (
+                settings.MODEL_CFG["bottleneck_dim"]
+                if settings.MODEL_CFG["bottleneck_dim"] is not None
+                else settings.MODEL_CFG["emb_dim"]
+            )
+            input_activation_grads = emb_weight.grad[: settings.SEQUENCE_LENGTH, :grad_size]
+
             # Detach and convert to bfloat16 to ensure we only save the values
             input_activation_grads = input_activation_grads.detach().to(torch.bfloat16).cpu()
 

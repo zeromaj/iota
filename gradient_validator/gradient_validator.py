@@ -267,7 +267,12 @@ class GradientValidator(BaseNeuron):
                 # Get the embedding layer weight grads  instead of the input activations grads
                 # This is because input activation grads of the first layer do not exist.
                 emb_weight = self.model.tok_emb.weight
-                input_activation_grads = emb_weight.grad[:SEQUENCE_LENGTH]
+                grad_size = (
+                    settings.MODEL_CFG["bottleneck_dim"]
+                    if settings.MODEL_CFG["bottleneck_dim"] is not None
+                    else settings.MODEL_CFG["emb_dim"]
+                )
+                input_activation_grads = emb_weight.grad[:SEQUENCE_LENGTH, :grad_size]
 
                 # Detach and convert to bfloat16 to ensure we only save the values
                 input_activation_grads = input_activation_grads.detach().to(torch.bfloat16).cpu()
