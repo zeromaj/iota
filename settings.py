@@ -12,6 +12,8 @@ if not load_dotenv(dotenv_path=DOTENV_PATH):
     # raise ValueError("No .env file found")
     logger.warning("No .env file found")
 
+MOCK = os.getenv("MOCK") == "True"
+
 # Model
 TOKENIZER_NAME = "meta-llama/Llama-3.2-1B"
 PRETRAINED = False
@@ -37,7 +39,7 @@ GRAD_CLIP_NORM = 1.0
 LEARNING_RATE = 5 * 1e-4
 TOTAL_TRAIN_STEPS = 100_000
 LR_WARMUP_START_FACTOR = 5e-3
-LR_WARMUP_STEPS = 3500
+LR_WARMUP_STEPS = 500
 LR_CONST_STEPS = 500
 LR_TAIL_STEPS_FRAC = 0.02
 LR_FINAL_FACTOR = 0.10
@@ -45,25 +47,26 @@ LR_SAW_CYCLE_LENGTH = 1000
 USE_WANDB = False
 
 # MODEL MERGING
-MINER_MERGE_PARTITIONS = 0.6
-MINERS_REQUIRED_FOR_WEIGHT_UPLOADING = 0.7
+MINER_MERGE_PARTITIONS = 0.3
+TARGET_EFFECTIVE_BATCH_SIZE = 4 if MOCK else 50
 
 # swarm
-MINERS_PER_LAYER = 1
 # MODEL_SPLITS = [[-1, 5], [5, 10], [10, -1]]  # For 1B models
 # MODEL_SPLITS = [[-1, 3], [3, -1]]  # For 100M models 2 layers
-# MODEL_SPLITS = [[-1, 2], [2, 4], [4, -1]]  # For 100M models 3 layers
+MOCK_MODEL_SPLITS = [[-1, 2], [2, 4], [4, -1]]  # For 100M models 3 layers
 # MODEL_SPLITS = [[-1, 9], [9, 19], [19, -1]] # For 3B models
 # MODEL_SPLITS = [[-1, 11], [11, 27], [27, -1]]  # For 12B models
-MODEL_SPLITS = [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]]  # 15B
+REAL_MODEL_SPLITS = [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]]  # 15B
 # 13B 5 layers
 # MODEL_SPLITS = [[-1, 8], [8, 16], [16, 24], [24, 32], [32, -1]]
+
+MODEL_SPLITS = MOCK_MODEL_SPLITS if MOCK else REAL_MODEL_SPLITS
+
 N_LAYERS = len(MODEL_SPLITS)
 TIMEOUT = 20000000000000000
 PHASE_TIMEOUT = 60 * 60  # 1 hour
 
 HF_TOKEN = os.getenv("HF_TOKEN")
-MOCK = os.getenv("MOCK") == "True"
 SYNC_WEIGHTS = os.getenv("SYNC_WEIGHTS") == "True"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -138,19 +141,32 @@ netuid = int(os.getenv("netuid", "9"))
 __spec_version__ = 4062
 # ==============================================
 # DASHBOARD
-DASHBOARD_BASE_URL = os.getenv("DASHBOARD_BASE_URL", "https://swarm.api.macrocosmos.ai/")
-DASHBOARD_ACCESS_KEY = os.getenv("DASHBOARD_ACCESS_KEY")
+DASHBOARD_ENV = os.getenv("DASHBOARD_ENV", "prod").lower()  # "prod" or "staging"
+DASHBOARD_BASE_URL = os.getenv(f"{DASHBOARD_ENV.upper()}_DASHBOARD_BASE_URL", "https://swarm.api.macrocosmos.ai/")
+DASHBOARD_ACCESS_KEY = os.getenv(f"{DASHBOARD_ENV.upper()}_DASHBOARD_ACCESS_KEY")
 ENABLE_DASHBOARD_REPORTING = os.getenv("ENABLE_DASHBOARD_REPORTING", "True") == "True"
 
-DASHBOARD_ENV = os.getenv("DASHBOARD_ENV", "prod").lower()  # "prod" or "staging"
 # Controls whether dashboard-related logs are printed to the terminal
 DASHBOARD_LOGS = os.getenv("DASHBOARD_LOGS", "True") == "True"
 
+# Validate dashboard environment if reporting is enabled
 if ENABLE_DASHBOARD_REPORTING:
     if not (DASHBOARD_ENV == "prod" or DASHBOARD_ENV == "staging"):
         raise ValueError(f"Invalid DASHBOARD_ENV: {DASHBOARD_ENV}. Must be 'prod' or 'staging'.")
+
+    # Validate that required dashboard settings are present
+    if not DASHBOARD_BASE_URL:
+        logger.warning(
+            f"Dashboard reporting enabled but no DASHBOARD_BASE_URL found for environment '{DASHBOARD_ENV.upper()}'"
+        )
+    if not DASHBOARD_ACCESS_KEY:
+        logger.warning(
+            f"Dashboard reporting enabled but no DASHBOARD_ACCESS_KEY found for environment '{DASHBOARD_ENV.upper()}'"
+        )
+
+    logger.info(f"Dashboard reporting enabled for {DASHBOARD_ENV} environment: {DASHBOARD_BASE_URL}")
 else:
-    DASHBOARD_BASE_URL = None
+    logger.info("Dashboard reporting is disabled")
 
 MINER_REPORT_INTERVAL = 180  # 3 minutes in seconds
 MINER_ACTIVITY_TIMEOUT = (
@@ -200,3 +216,7 @@ BURN_FACTOR = 5  # 1-1/BurnFactor % is burned, for 5 it's 80%
 
 HOTKEY_LIMIT = "1/second" if MOCK else "1/second"
 IP_LIMIT = f"{1*len(MINER_HOTKEYS)}/second" if MOCK else "1/second"
+
+MINERS_REQUIRED_FOR_WEIGHT_UPLOADING = 0.8
+ACTIVATIONS_REQUIRED_FOR_WEIGHT_MERGING_DECREASE_INTERVAL = 1 if MOCK else 30
+PARTITIONS_REQUIRED_FOR_WEIGHT_MERGING_DECREASE_INTERVAL = 1 if MOCK else 30

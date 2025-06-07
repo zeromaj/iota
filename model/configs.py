@@ -7,7 +7,7 @@ LLAMA32_CONFIG_100M = {
     "context_length": 8192,  # Maximum context length to use (reduced to save memory)
     "orig_context_length": 131_072,  # Context length that was used to train the model
     "emb_dim": 512,  # Embedding dimension
-    "bottleneck_dim": None,  # Bottleneck dimension, if None
+    "bottleneck_dim": 8,  # Bottleneck dimension, if None
     "quantize_activations": False,
     "quantize_activations_grads": False,
     "quantize_weights": False,
