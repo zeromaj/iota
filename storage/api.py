@@ -24,7 +24,6 @@ from storage.serializers import (
     MultipartUploadRequest,
     MultipartUploadResponse,
     CompleteMultipartUploadRequest,
-    AbortMultipartUploadRequest,
 )
 from uuid import uuid4
 from utils.s3_interactions import (
@@ -33,6 +32,7 @@ from utils.s3_interactions import (
     complete_multipart_upload,
     abort_multipart_upload,
 )
+from utils.shared_states import MergingPhase
 
 
 def get_signed_by_key(request: Request) -> str:
@@ -219,6 +219,7 @@ async def get_random_activation(
         hotkey=signed_by,
         request_id=str(uuid4()),
     ):
+        orchestrator.validate_state(expected_status=MergingPhase.IS_TRAINING, hotkey=signed_by)
         headers = EpistulaHeaders(
             version=version,
             timestamp=timestamp,
@@ -815,47 +816,4 @@ async def complete_multipart_upload_endpoint(
             abort_multipart_upload(complete_request.path, complete_request.upload_id)
         except Exception:
             pass  # Ignore errors during abort
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/multipart_upload/abort", response_model=StorageResponse)
-@hotkey_limiter.limit(settings.HOTKEY_LIMIT)
-async def abort_multipart_upload_endpoint(
-    request: Request,  # Required for rate limiting
-    abort_request: AbortMultipartUploadRequest,
-    version: Annotated[str, Header(alias="Epistula-Version")],
-    timestamp: Annotated[str, Header(alias="Epistula-Timestamp")],
-    uuid: Annotated[str, Header(alias="Epistula-Uuid")],
-    signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
-    request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
-):
-    """Abort a multipart upload."""
-    headers = EpistulaHeaders(
-        version=version,
-        timestamp=timestamp,
-        uuid=uuid,
-        signed_by=signed_by,
-        request_signature=request_signature,
-    )
-    error = headers.verify_signature_v2(create_message_body(abort_request.model_dump()), time.time())
-    if error:
-        raise HTTPException(status_code=401, detail=f"Epistula verification failed: {error}")
-
-    if settings.BITTENSOR:
-        # Verify the entity exists in metagraph
-        verify_entity_type(
-            signed_by=signed_by,
-            metagraph=orchestrator.metagraph,
-            required_type=None,  # Allow both
-        )
-
-    logger.info(f"Aborting multipart upload {abort_request.upload_id} for {abort_request.path}")
-
-    try:
-        abort_multipart_upload(abort_request.path, abort_request.upload_id)
-
-        return StorageResponse(message="Multipart upload aborted successfully")
-
-    except Exception as e:
-        logger.error(f"Error aborting multipart upload: {e}")
         raise HTTPException(status_code=500, detail=str(e))
