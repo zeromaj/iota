@@ -1,4 +1,5 @@
 import asyncio
+import random
 import time
 import uuid
 import json
@@ -28,6 +29,10 @@ from storage.serializers import ActivationResponse
 
 
 WAIT_TIME = 5 if settings.MOCK else 15
+
+
+class WrongStateException(Exception):
+    pass
 
 
 class Miner(BaseNeuron):
@@ -307,70 +312,83 @@ class Miner(BaseNeuron):
         # Status is now managed through API calls, so we don't need to access orchestrator directly
 
     async def step(self):
-        # self.saved_forward_activations
-        # Check if we're merging
-        if self.saved_forward_activations:
-            for activation_uid, activation_data in list(self.saved_forward_activations.items()):
-                upload_time = activation_data[-1]
-                if upload_time < time.time() - settings.ACTIVATION_CACHE_TIMEOUT:
-                    del self.saved_forward_activations[activation_uid]
-                    logger.warning(
-                        f"🗑️ Removed activation {activation_uid} from miner {self.hotkey[:8]} cache due to timeout"
-                    )
+        # Check if we can delete any cached activations
+        try:
+            if self.saved_forward_activations:
+                for activation_uid, activation_data in list(self.saved_forward_activations.items()):
+                    upload_time = activation_data[-1]
+                    if upload_time < time.time() - settings.ACTIVATION_CACHE_TIMEOUT:
+                        del self.saved_forward_activations[activation_uid]
+                        logger.warning(
+                            f"🗑️ Removed activation {activation_uid} from miner {self.hotkey[:8]} cache due to timeout"
+                        )
 
-        if not self.training:
-            result = await self.api_client.merge_info(layer=self.layer)
-            logger.info(f"🔄 Miner {self.hotkey[:8]} entering merging phase: {result}")
-            # Clear cache before weight syncing
-            self.saved_forward_activations.clear()
-            try:
-                await self.sync_weights(num_sections=int(result["num_sections"]))
-                self.training = True
+            # If self.training is false, we want to sync weights
+            if not self.training:
+                result = await self.api_client.merge_info(layer=self.layer)
+                if result["status"] != MergingPhase.WEIGHTS_UPLOADING.value:
+                    logger.warning(f"🔄 Miner {self.hotkey[:8]} not in weights uploading phase, skipping weight sync")
+                    self.training = True
+                    return
+
+                logger.info(f"🔄 Miner {self.hotkey[:8]} entering merging phase: {result}")
+                # Clear cache before weight syncing
+                self.saved_forward_activations.clear()
+                try:
+                    await self.sync_weights(num_sections=int(result["num_sections"]))
+                    self.training = True
+                    return
+                except Exception as e:
+                    logger.exception(f"❌ Error syncing weights for miner {self.hotkey[:8]}: {e}")
+                    await asyncio.sleep(WAIT_TIME)
+                    raise
+
+            # If we've done enough backwards steps, we can do an all-reduce
+            if (
+                self.backwards_since_reduce >= settings.LOCAL_OPTIMIZER_STEPS
+                and settings.LOCAL_OPTIMIZER_STEPS < settings.GLOBAL_OPTIMIZER_STEPS
+            ):
+                logger.info(
+                    f"🔄 Performing local all-reduce for miner {self.hotkey[:8]} | Steps: {self.backwards_since_reduce}"
+                )
+                await self.local_all_reduce()
+                self.saved_forward_activations.clear()
+                self.backwards_since_reduce = 0
                 return
-            except Exception as e:
-                logger.exception(f"❌ Error syncing weights for miner {self.hotkey[:8]}: {e}")
-                await asyncio.sleep(WAIT_TIME)
-                raise
 
-        if (
-            self.backwards_since_reduce >= settings.LOCAL_OPTIMIZER_STEPS
-            and settings.LOCAL_OPTIMIZER_STEPS < settings.GLOBAL_OPTIMIZER_STEPS
-        ):
-            logger.info(
-                f"🔄 Performing local all-reduce for miner {self.hotkey[:8]} | Steps: {self.backwards_since_reduce}"
-            )
-            await self.local_all_reduce()
-            self.saved_forward_activations.clear()
-            self.backwards_since_reduce = 0
-            return
+            if not self.has_layer:
+                raise Exception("Layer is not set")
 
-        if not self.has_layer:
-            raise Exception("Layer is not set")
+            # try to get an activation, if we're not training, we handle the bad state and set self.training to False
+            activation_response: ActivationResponse = await self.api_client.get_random_activation()
+            self._handle_bad_state(activation_response)
 
-        activation_response: ActivationResponse = await self.api_client.get_random_activation()
-        if activation_response.reason == "not training":
-            logger.warning(
-                f"⏸️ Miner {self.hotkey[:8]} on layer {self.layer} is merging based on get_random_activation reason, skipping forward step"
+            # if we have an activation, we can do a forward or backward step
+            if activation_response.direction is not None:
+                if activation_response.direction == "forward":
+                    return await self.forward(activation=activation_response)
+                elif activation_response.direction == "backward":
+                    return await self.backward(activation=activation_response)
+
+            if self.layer == 0:
+                if activation_response.reason == "out_of_cache":
+                    logger.info(
+                        f"⏸️ Miner {self.hotkey[:8]} on layer {self.layer} is out of cache, skipping forward step"
+                    )
+                    await asyncio.sleep(1)
+                    return
+                return await self.forward()
+
+            logger.debug(
+                f"⏸️ Miner {self.hotkey[:8]} on layer {self.layer} is idle, no activations are ready... waiting"
             )
             await asyncio.sleep(1)
-            self.training = False
-            return
-
-        if activation_response.direction is not None:
-            if activation_response.direction == "forward":
-                return await self.forward(activation=activation_response)
-            elif activation_response.direction == "backward":
-                return await self.backward(activation=activation_response)
-
-        if self.layer == 0:
-            if activation_response.reason == "out_of_cache":
-                logger.info(f"⏸️ Miner {self.hotkey[:8]} on layer {self.layer} is out of cache, skipping forward step")
-                await asyncio.sleep(1)
-                return
-            return await self.forward()
-
-        logger.debug(f"⏸️ Miner {self.hotkey[:8]} on layer {self.layer} is idle, no activations are ready... waiting")
-        await asyncio.sleep(1)
+        except WrongStateException as e:
+            logger.warning("Miner in wrong state")
+        except Exception as e:
+            logger.exception(f"❌ Error in step: {e}")
+        finally:
+            await asyncio.sleep(1)
 
     async def local_step(self):
         if self.layer is None:
@@ -486,18 +504,14 @@ class Miner(BaseNeuron):
             logger.debug(f"EPOCH {self.epoch}: UPLOADING WEIGHTS: {self.hotkey} | {self.layer} | {weights}")
 
             logger.info("📤 Notifying orchestrator of uploaded weights...")
-            success = (
-                await self.api_client.notify_weights_uploaded(
-                    weights_path=weight_path,
-                    metadata_path=weight_metadata_path,
-                    optimizer_state_path=optimizer_state_path,
-                    optimizer_state_metadata_path=optimizer_state_metadata_path,
-                )
-            )["success"]
-            if success != "success":
-                logger.error(f"❌ Miner {self.hotkey[:8]} failed to upload weights to orchestrator")
-                raise Exception(f"Miner {self.hotkey[:8]} failed to upload weights to orchestrator. Error: {success}")
-
+            await asyncio.sleep(20 * random.random())
+            success = await self.api_client.notify_weights_uploaded(
+                weights_path=weight_path,
+                metadata_path=weight_metadata_path,
+                optimizer_state_path=optimizer_state_path,
+                optimizer_state_metadata_path=optimizer_state_metadata_path,
+            )
+            self._handle_bad_state(success)
             logger.info("✅ Successfully notified orchestrator of weight upload")
 
             # TODO: start downloading other miners parititons as they become available
@@ -509,6 +523,7 @@ class Miner(BaseNeuron):
             information_packets = [SubmittedWeights(**packet) for packet in information_packets]
 
             # download the partitons, apply the merge (simple avg) and upload the merged weights
+            await asyncio.sleep(20 * random.random())
             logger.info(f"🔄 Merging {len(information_packets)} weight partitions...")
             partitions: list[Partition] = await self._merge_models(
                 information_packets=information_packets,
@@ -519,10 +534,13 @@ class Miner(BaseNeuron):
             logger.debug(
                 f"Miner {self.hotkey[:8]} notifying orchestrator of merged partitions: {partitions}, epoch {self.epoch}"
             )
-            await self.api_client.notify_merged_partitions_uploaded(partitions=partitions)
+            success = await self.api_client.notify_merged_partitions_uploaded(partitions=partitions)
+            self._handle_bad_state(success)
             logger.info("✅ Successfully uploaded merged partitions")
+        except WrongStateException as e:
+            logger.warning("Miner in wrong state")
         except Exception as e:
-            logger.error(f"❌ Miner {self.hotkey[:8]} failed to sync weights: {e}")
+            logger.exception(f"❌ Miner {self.hotkey[:8]} failed to sync weights: {e}")
 
         # Now we poll again until the merge process is complete
         await self.await_orchestrator_status(status=MergingPhase.IS_TRAINING)
@@ -722,18 +740,15 @@ class Miner(BaseNeuron):
             uid=activation_uid, layer=self.layer, direction=direction, data=activations
         )
 
-        # await self.api_client.upload_activation_to_orchestrator(
-        #     activation_uid=activation_uid,
-        #     layer=self.layer,
-        #     direction=direction,
-        #     activation_path=storage_path,
-        # )
-
         logger.debug(f"📤 Uploaded activation to path: {storage_path}")
         logger.debug(f"📤 Updating status with direction {direction}")
-        await self.api_client.update_status(
-            status=direction, activation_uid=activation_uid, activation_path=storage_path
-        )
+        try:
+            result = await self.api_client.update_status(
+                status=direction, activation_uid=activation_uid, activation_path=storage_path
+            )
+            self._handle_bad_state(result)
+        except Exception as e:
+            logger.error(f"❌ Error updating status (submitting activation): {e}")
 
         # Clean up the activations tensor after upload
         del activations
@@ -804,9 +819,7 @@ class Miner(BaseNeuron):
 
         output_activations, state = await self._forward(input_activations)
 
-        self.processed_forward_activations.append(activation_uid)
         self.saved_forward_activations[activation_uid] = (input_activations, output_activations, state, time.time())
-        self.forwards_since_reduce += 1
 
         if self.layer == settings.N_LAYERS - 1:
             initial_activations_path = activation.initial_activation_path
@@ -847,8 +860,11 @@ class Miner(BaseNeuron):
                 time.time(),
             )
 
-            await self.api_client.update_status(status="forward", activation_uid=activation_uid, activation_path=None)
+            result = await self.api_client.update_status(
+                status="forward", activation_uid=activation_uid, activation_path=None
+            )
             logger.debug(f"📤 Updated status to 'forward' for activation {activation_uid}")
+            self._handle_bad_state(result)
 
             try:
                 await self.backward(activation=activation)
@@ -959,18 +975,6 @@ class Miner(BaseNeuron):
         buffer = io.BytesIO()
         torch.save(data, buffer)
         data_bytes = buffer.getvalue()
-
-        # Use orchestrator-coordinated upload that automatically handles multipart for large files
-        return await smart_upload_via_orchestrator_async(self.api_client, data_bytes, path)
-
-    async def upload_weights(self, data: torch.Tensor, miner_hotkey: str, num_sections: int, epoch: int) -> str:
-        """Upload weights to S3 storage using orchestrator-coordinated multipart upload."""
-        # Generate the S3 path
-        path = f"weights/{miner_hotkey}/{num_sections}/{epoch}/{uuid.uuid4()}.pt"
-
-        # Convert tensor to bytes
-        data = data.view(torch.uint8)
-        data_bytes = data.cpu().detach().numpy().tobytes()
 
         # Use orchestrator-coordinated upload that automatically handles multipart for large files
         return await smart_upload_via_orchestrator_async(self.api_client, data_bytes, path)
@@ -1087,6 +1091,24 @@ class Miner(BaseNeuron):
             optimizer_state_path,
             optimizer_state_metadata_path,
         )
+
+    def _handle_bad_state(self, success: Any):
+        """If the miner submitts a request that doesn't match the state the orchestrator expects, we raise an exception. This is
+        used e.g. when the miner tried to upload weights in the training phase."""
+        if not isinstance(success, dict):
+            return
+
+        if success.get("expected_state"):
+            logger.warning(
+                f"❌ Miner attempted to make a request in the wrong state. Expected state: {success['expected_state']}"
+            )
+            if success["expected_state"] == "is_training":
+                self.training = True
+            else:
+                self.training = False
+            raise WrongStateException(
+                f"Miner {self.hotkey[:8]} attempted to make a request in the wrong state. Expected state: {success['expected_state']}"
+            )
 
     async def start(self) -> asyncio.Task:
         return asyncio.create_task(self.run())

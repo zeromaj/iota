@@ -13,7 +13,6 @@ from storage.serializers import (
     PresignedUrlRequest,
     MultipartUploadRequest,
     CompleteMultipartUploadRequest,
-    AbortMultipartUploadRequest,
 )
 from orchestrator.serializers import (
     LossReportRequest,
@@ -84,6 +83,14 @@ class APIClient:
                             await asyncio.sleep(self.retry_delay * (attempt + 1))
                             continue
 
+                    # Conflict with the current state of the target resource
+                    if response.status == 409:
+                        response_json = await response.json()
+                        logger.warning(
+                            f"Miner attempted to make a request ({method} {url}) in the wrong state: {response_json['detail']}"
+                        )
+                        return {"expected_state": response_json["detail"]}
+
                     if response.status >= 400:
                         error_text = await response.text()
                         logger.error(f"Request failed with status {response.status}: {error_text}")
@@ -129,6 +136,7 @@ class APIClient:
     async def register(self) -> int:
         logger.info(f"🔗 API: Registering miner {self.wallet.hotkey.ss58_address[:8]}")
         response = await self._make_request("post", f"{self.base_url}/orchestrator/register", json={})
+
         try:
             layer = MinerRegistrationResponse(**response).layer
             logger.info(f"✅ API: Registration successful | Layer: {layer}")
@@ -149,7 +157,6 @@ class APIClient:
             data["activation_uid"] = activation_uid
 
         response = await self._make_request("post", f"{self.base_url}/orchestrator/miners/status", json=data)
-        logger.debug("✅ API: Status updated successfully")
         return response
 
     async def request_layer(self) -> LayerAssignmentResponse:
@@ -232,6 +239,11 @@ class APIClient:
         logger.debug("🎲 API: Getting random activation")
         response = await self._make_request("post", f"{self.base_url}/storage/activations/random")
         logger.debug(f"Got random activation: {response}")
+
+        # If the request contains an expected state error, return the response
+        if response.get("expected_state"):
+            return response
+
         result = ActivationResponse(**response)
         if result.activation_uid:
             logger.debug(
@@ -349,23 +361,6 @@ class APIClient:
         response = await self._make_request(
             method="post",
             url=f"{self.base_url}/storage/multipart_upload/complete",
-            json=data.model_dump(),
-        )
-        return response["data"]
-
-    async def abort_multipart_upload(
-        self,
-        path: str,
-        upload_id: str,
-    ) -> dict[str, Any]:
-        """Abort a multipart upload."""
-        data = AbortMultipartUploadRequest(
-            path=path,
-            upload_id=upload_id,
-        )
-        response = await self._make_request(
-            method="post",
-            url=f"{self.base_url}/storage/multipart_upload/abort",
             json=data.model_dump(),
         )
         return response["data"]
