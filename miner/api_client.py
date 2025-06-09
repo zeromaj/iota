@@ -368,12 +368,18 @@ class APIClient:
     async def health_check(self) -> bool:
         try:
             logger.debug("🏥 API: Health check")
-            await self._make_request(
+            response = await self._make_request(
                 method="get",
                 url=f"{self.base_url}/orchestrator/healthcheck",
             )
+            logger.debug(f"🏥 API: Health check response: {response}")
+            if response.get("status") != "healthy":
+                logger.warning("❌ API: Orchestrator failed health check!")
+                return False
+
             logger.debug("✅ API: Health check passed")
             return True
+
         except Exception as e:
-            logger.warning("❌ API: Orchestrator failed health check!")
+            logger.warning(f"❌ API: Health check failed: {e}")
             return False
