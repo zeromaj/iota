@@ -1,5 +1,4 @@
 import asyncio
-import random
 import time
 import uuid
 import json
@@ -29,6 +28,22 @@ from storage.serializers import ActivationResponse
 
 
 WAIT_TIME = 5 if settings.MOCK else 15
+
+PHASE_ORDER = [
+    MergingPhase.IS_TRAINING,
+    MergingPhase.WEIGHTS_UPLOADING,
+    MergingPhase.MINERS_MERGING_PARTITIONS,
+]
+
+
+def next_phase(phase: MergingPhase) -> MergingPhase:
+    try:
+        current_index = PHASE_ORDER.index(phase)
+        next_index = (current_index + 1) % len(PHASE_ORDER)
+        return PHASE_ORDER[next_index]
+
+    except ValueError:
+        raise ValueError(f"Invalid phase: {phase}. Must be one of {PHASE_ORDER}")
 
 
 class WrongStateException(Exception):
@@ -174,6 +189,29 @@ class Miner(BaseNeuron):
             logger.info(f"Miner {getattr(self, 'hotkey', 'N/A')} healthcheck API runner cleaned up.")
             self.health_app_runner = None
 
+    async def reset_entire_miner_state(self):
+        """
+        Reset the entire miner state, including the API client, health server, and all other state.
+        """
+        # Stop existing background tasks and services to prevent resource leaks.
+        if getattr(self, "api_client", None):
+            await self.api_client.__aexit__(None, None, None)
+
+        await self._stop_health_server()
+
+        if getattr(self, "metagraph_syncer", None):
+            self.metagraph_syncer.is_running = False
+
+        # Create a new, pristine instance of the miner.
+        # `create` will call `__init__` and `initialize`, setting up a fresh state.
+        new_miner = await type(self).create(
+            settings.wallet_name, settings.wallet_hotkey, settings.TIMEOUT, settings.N_LAYERS
+        )
+
+        # Replace the current object's state with the state of the new instance.
+        # This effectively resets the object in place.
+        self.__dict__ = new_miner.__dict__
+
     async def run(self):
         logger.info(f"🚀 Starting miner {self.hotkey[:8]} | Timeout: {self.TIMEOUT}s")
 
@@ -198,8 +236,16 @@ class Miner(BaseNeuron):
                         and not await self.api_client.health_check()
                         and not self.reregister_needed
                     ):
-                        logger.warning(f"🏥 Health check failed for miner {self.hotkey[:8]}, reregistering")
-                        self.reregister_needed = True
+                        logger.warning(
+                            f"🏥 Health check failed for miner {self.hotkey[:8]}, resetting and reregistering."
+                        )
+                        await self.reset_entire_miner_state()
+
+                        # The health server was stopped during reset, so we restart it.
+                        if settings.LAUNCH_HEALTH:
+                            await self._start_health_server()
+
+                        # A small delay before continuing might be beneficial.
                         await asyncio.sleep(10)
                         continue
 
@@ -313,6 +359,13 @@ class Miner(BaseNeuron):
 
     async def step(self):
         # Check if we can delete any cached activations
+        logger.info(f"🔄 Miner {self.hotkey[:8]} step | is_training: {self.training}")
+        logger.info(f"🔄 Miner {self.hotkey[:8]} step | backwards_since_reduce: {self.backwards_since_reduce}")
+        logger.info(f"🔄 Miner {self.hotkey[:8]} step | backwards_since_sync: {self.backwards_since_sync}")
+        logger.info(
+            f"🔄 Miner {self.hotkey[:8]} step | len(saved_forward_activations): {len(self.saved_forward_activations)}"
+        )
+
         try:
             if self.saved_forward_activations:
                 for activation_uid, activation_data in list(self.saved_forward_activations.items()):
@@ -384,7 +437,7 @@ class Miner(BaseNeuron):
             )
             await asyncio.sleep(1)
         except WrongStateException as e:
-            logger.warning("Miner in wrong state")
+            pass
         except Exception as e:
             logger.exception(f"❌ Error in step: {e}")
         finally:
@@ -455,19 +508,49 @@ class Miner(BaseNeuron):
         self.layer: int = await self.api_client.register()
         logger.info(f"✅ Successfully registered miner {self.hotkey[:8]} | Assigned to layer: {self.layer}")
 
-    async def await_orchestrator_status(self, status: MergingPhase):
+    async def await_orchestrator_status(self, desired_status: MergingPhase):
+        """Wait for the orchestrator to reach the desired status.
+
+        Args:
+            status (MergingPhase): The status to wait for
+        """
+        # Wait for the orchestrator to reach the desired status. This is a blocking call.
         while True:
-            logger.info(f"⏳ Miner {self.hotkey[:8]} in epoch {self.epoch} waiting for orchestrator status: {status}")
+            logger.info(
+                f"⏳ Miner {self.hotkey[:8]} in epoch {self.epoch} waiting for orchestrator status: {desired_status}"
+            )
+
+            # .merge_info informs the miner what the stage of the orchestrator is in.
             status_response = await self.api_client.merge_info(layer=self.layer)
-            if status_response.get("status") == status.value:
-                logger.info(f"✅ Orchestrator status reached: {status}")
+            orchestrator_status_str = status_response.get("status")
+
+            if not orchestrator_status_str:
+                logger.warning("Could not get a valid status from the orchestrator. Retrying...")
+                await asyncio.sleep(1.5 if settings.MOCK else 10)
+                continue
+
+            try:
+                orchestrator_status = MergingPhase(orchestrator_status_str)
+            except ValueError:
+                logger.warning(f"Orchestrator returned an unknown status: '{orchestrator_status_str}'. Retrying...")
+                await asyncio.sleep(1.5 if settings.MOCK else 10)
+                continue
+
+            if desired_status == orchestrator_status:
+                logger.info(f"✅ Done waiting for orchestrator! Moving to next phase: {desired_status.value}")
                 break
-            await asyncio.sleep(1.5 if settings.MOCK else 10)
+            if desired_status == next_phase(orchestrator_status):
+                logger.info(f"✅ Correctly waiting for the next phase of the orchestrator: {orchestrator_status.value}")
+                await asyncio.sleep(1.5 if settings.MOCK else 10)
+            else:
+                self.training = True  # always default back to training.
+                raise WrongStateException(f"Miner missed phased: {orchestrator_status} != {next_phase(desired_status)}")
 
     async def sync_weights(self, num_sections: int):
         if not self.has_layer:
             logger.warning(f"⚠️ Miner {self.hotkey[:8]} cannot sync weights: layer not assigned")
             return
+
         try:
             logger.info(
                 f"🔄 Starting weight sync for miner {self.hotkey[:8]} | Layer: {self.layer} | Epoch: {self.epoch} | Steps since sync: {self.backwards_since_sync}"
@@ -504,7 +587,6 @@ class Miner(BaseNeuron):
             logger.debug(f"EPOCH {self.epoch}: UPLOADING WEIGHTS: {self.hotkey} | {self.layer} | {weights}")
 
             logger.info("📤 Notifying orchestrator of uploaded weights...")
-            await asyncio.sleep(20 * random.random())
             success = await self.api_client.notify_weights_uploaded(
                 weights_path=weight_path,
                 metadata_path=weight_metadata_path,
@@ -516,44 +598,49 @@ class Miner(BaseNeuron):
 
             # TODO: start downloading other miners parititons as they become available
             # TODO: make a placeholder for the polling process
-            await self.await_orchestrator_status(status=MergingPhase.MINERS_MERGING_PARTITIONS)
+            await self.await_orchestrator_status(desired_status=MergingPhase.MINERS_MERGING_PARTITIONS)
 
             logger.info("📥 Getting weight partition info for merging...")
             information_packets, partition_ids = await self.api_client.weight_partition_info()
             information_packets = [SubmittedWeights(**packet) for packet in information_packets]
 
             # download the partitons, apply the merge (simple avg) and upload the merged weights
-            await asyncio.sleep(20 * random.random())
-            logger.info(f"🔄 Merging {len(information_packets)} weight partitions...")
+            logger.info(f"🔄 Attempting to merge {len(information_packets)} weight partitions...")
             partitions: list[Partition] = await self._merge_models(
                 information_packets=information_packets,
                 partition_ids=partition_ids,
+                num_sections=num_sections,
             )
 
-            logger.info("📤 Notifying orchestrator of merged partitions...")
-            logger.debug(
-                f"Miner {self.hotkey[:8]} notifying orchestrator of merged partitions: {partitions}, epoch {self.epoch}"
-            )
+            logger.info(f"📤 Notifying orchestrator of {len(partitions)} merged partitions, epoch {self.epoch}")
             success = await self.api_client.notify_merged_partitions_uploaded(partitions=partitions)
+
             self._handle_bad_state(success)
-            logger.info("✅ Successfully uploaded merged partitions")
+
+            logger.info(f"✅ Successfully uploaded merged {len(partitions)} partitions")
+
         except WrongStateException as e:
-            logger.warning("Miner in wrong state")
+            logger.warning(f"Miner {self.hotkey[:8]} in wrong state: {e}")
+            self.training = True  # always default back to training.
         except Exception as e:
             logger.exception(f"❌ Miner {self.hotkey[:8]} failed to sync weights: {e}")
 
-        # Now we poll again until the merge process is complete
-        await self.await_orchestrator_status(status=MergingPhase.IS_TRAINING)
+        await self.move_to_training()
 
-        # Once merging is complete, we download the layer weights and update the model
+    async def move_to_training(self):
+        """Move the miner to the training phase."""
+        logger.info(f"🔄 Moving miner {self.hotkey[:8]} to training phase")
         try:
+            # Now we poll again until the merge process is complete
+            await self.await_orchestrator_status(desired_status=MergingPhase.IS_TRAINING)
+
+            # Once merging is complete, we download the layer weights and update the model
             logger.info("📥 Downloading merged weights...")
             self.weights, self.optimizer = await self.download_weights()
             logger.info("✅ Successfully downloaded merged weights")
-            logger.warning(f"WEIGHTS DOWNLOADED: {self.weights}")
+
         except Exception as e:
-            logger.error(f"❌ Error downloading weights after merge: {e}")
-            # Continue even if weight download fails
+            logger.error(f"❌ Error moving miner {self.hotkey[:8]} to training phase: {e}")
 
         self.backwards_since_sync = 0
         self.epoch += 1
@@ -565,19 +652,43 @@ class Miner(BaseNeuron):
         self._clean_gpu_memory()
 
     async def _merge_models(
-        self, information_packets: list[SubmittedWeights], partition_ids: list[int]
+        self, information_packets: list[SubmittedWeights], partition_ids: list[int], num_sections: int
     ) -> list[Partition]:
         """Merge the models from the other miners.
 
         Args:
             information_packets (list[SubmittedWeights]): The paths to the other miners' partitions
             partition_ids (list[int]): The partition indices to merge
+            num_sections (int): The number of sections to merge
 
         Returns:
             list[Partition]: The merged partitions
         """
-
+        # Filter out packets that don't match the current miner's partition scheme.
+        # This is a defensive measure against potential orchestrator bugs sending inconsistent data.
+        # This also improves the speed of the merge by only downloading the partitions that are relevant to the current miner.
+        valid_packets = []
         partitions: list[Partition] = []
+
+        for packet in information_packets:
+            try:
+                # s3://.../weights/HOTKEY/NUM_SECTIONS/EPOCH/uuid.pt
+                packet_num_sections = int(packet.weights_path.split("/")[-3])
+                if packet_num_sections == num_sections:
+                    valid_packets.append(packet)
+                else:
+                    logger.warning(
+                        f"Skipping merge with miner {packet.hotkey} due to mismatched partition sections. "
+                        f"My sections: {num_sections}, Their sections: {packet_num_sections}."
+                    )
+            except (ValueError, IndexError):
+                logger.warning(f"Could not parse num_sections from path: {packet.weights_path}. Skipping packet.")
+
+        if not valid_packets:
+            logger.error("No valid miner partitions found to merge with after filtering. Aborting merge.")
+            return partitions
+
+        information_packets = valid_packets
 
         # Loop over the partition indices one at a time and download the chunks from all miners.
         # Then perform merge, upload and move on to the next partition index
@@ -658,7 +769,6 @@ class Miner(BaseNeuron):
                     logger.exception(
                         f"Error downloading chunk {chunk_id} from {weights_path} and {weight_metadata_path}: {e}"
                     )
-                    time.sleep(60)
                     continue
 
             # Average the weights
@@ -748,7 +858,9 @@ class Miner(BaseNeuron):
             )
             self._handle_bad_state(result)
         except Exception as e:
-            logger.error(f"❌ Error updating status (submitting activation): {e}")
+            logger.error(
+                f"❌ Error updating status (submitting activation): {e}... This was expected if you have completed backwards {settings.GLOBAL_OPTIMIZER_STEPS} passes! Else, you're in a bad state."
+            )
 
         # Clean up the activations tensor after upload
         del activations
@@ -1106,6 +1218,8 @@ class Miner(BaseNeuron):
                 self.training = True
             else:
                 self.training = False
+
+            logger.warning(f"❗️Miner has been put into training mode == {self.training} while inside _handle_bad_state")
             raise WrongStateException(
                 f"Miner {self.hotkey[:8]} attempted to make a request in the wrong state. Expected state: {success['expected_state']}"
             )
