@@ -59,7 +59,7 @@ class GradientValidator(BaseNeuron):
             port=int(settings.VALIDATOR_EXTERNAL_PORT),
             scheme=settings.VALIDATOR_SCHEME,
         )
-        validator.orchestrator_version = response.get("version")
+        validator.orchestrator_version = str(response.get("version"))
         return validator
 
     def _on_metagraph_updated(self, metagraph: bt.metagraph, netuid: int):
