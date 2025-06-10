@@ -54,11 +54,12 @@ class GradientValidator(BaseNeuron):
             await asyncio.sleep(5 if settings.MOCK else 30)
         validator.external_ip = requests.get("https://checkip.amazonaws.com").text.strip()
         logger.debug(f"External IP: {validator.external_ip}")
-        await validator.api_client.register_validator(
+        response = await validator.api_client.register_validator(
             host=validator.external_ip,
             port=int(settings.VALIDATOR_EXTERNAL_PORT),
             scheme=settings.VALIDATOR_SCHEME,
         )
+        validator.orchestrator_version = response.get("version")
         return validator
 
     def _on_metagraph_updated(self, metagraph: bt.metagraph, netuid: int):
@@ -215,7 +216,6 @@ class GradientValidator(BaseNeuron):
             is_valid, score, reason = await self.validate_activations(
                 validator_activations, miner_activations.to(DEVICE), direction="forward", activation_uid=activation_uid
             )
-            self.processed_forward_activations.append(activation_uid)
             self.saved_forward_activations[activation_uid] = (
                 activations,
                 validator_activations,
@@ -297,7 +297,6 @@ class GradientValidator(BaseNeuron):
                 activation_uid=activation_uid,
             )
             del self.saved_forward_activations[activation_uid]
-            self.processed_backward_activations.append(activation_uid)
             logger.debug(
                 f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: BACKWARD PASS COMPLETE: VALID: {is_valid}, SCORE: {score}, REASON: {reason}"
             )
@@ -658,8 +657,6 @@ class GradientValidator(BaseNeuron):
             self.layer = None
             self.weights = None
             self.saved_forward_activations = {}
-            self.processed_forward_activations = []
-            self.processed_backward_activations = []
             self.miner_weights = {}
             self.model = None
             self.optimizer = None
