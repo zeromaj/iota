@@ -70,16 +70,11 @@ class BaseNeuron(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
     hotkey: str | None = None
     MAX_ACTIVATION_CACHE_SIZE: int = settings.MAX_ACTIVATION_CACHE_SIZE
-    STEPS_UNTIL_ALL_REDUCE: int = 16
-    STEPS_UNTIL_SYNC: int = 16 * 4
     completed_optim_steps: int = 0
     saved_forward_activations: dict[str, tuple[torch.Tensor, torch.Tensor, float]] = Field(default_factory=dict)
     layer: int | None = None
-    processed_forward_activations: list[str] = Field(default_factory=list)
-    processed_backward_activations: list[str] = Field(default_factory=list)
     backwards_since_reduce: int = 0
     backwards_since_sync: int = 0
-    forwards_since_reduce: int = 0
     weights: torch.Tensor | None = None
     model: torch.nn.Module | None = None
     total_model_params: int | None = None
@@ -102,6 +97,7 @@ class BaseNeuron(BaseModel):
     uid: int | None = None
     wallet_name: str | None = None
     wallet_hotkey: str | None = None
+    orchestrator_version: str = ""
 
     def _clean_gpu_memory(self):
         """Force cleanup of GPU memory."""
@@ -600,9 +596,6 @@ class BaseNeuron(BaseModel):
         self.completed_optim_steps += 1
 
         self.backwards_since_reduce = 0
-        self.forwards_since_reduce = 0
-        self.processed_forward_activations = []
-        self.processed_backward_activations = []
         self.saved_forward_activations = {}
 
         # Log GPU memory after weight update
