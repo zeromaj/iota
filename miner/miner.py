@@ -22,7 +22,7 @@ from utils.s3_interactions import (
 )
 from utils.shared_states import MergingPhase
 from utils.partitions import ChunkData, Partition
-from utils.vector_utils import flatten_optimizer_state
+from utils.vector_utils import check_for_nans, flatten_optimizer_state
 from orchestrator.serializers import SubmittedWeights
 from storage.serializers import ActivationResponse
 
@@ -1217,6 +1217,8 @@ class Miner(BaseNeuron):
         epoch: int,
     ) -> tuple[str, str, str]:
         # Convert to NumPy array and save in raw binary format
+        check_for_nans(flattened_weights, f"uploading weights for miner {miner_hotkey}")
+        check_for_nans(flattened_optimizer_state, f"uploading optimizer state for miner {miner_hotkey}")
         weight_path, weight_metadata_path = await self.upload_tensor_with_metadata(
             flattened_weights, miner_hotkey, num_sections, epoch, "weights"
         )
