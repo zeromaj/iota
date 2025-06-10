@@ -24,14 +24,14 @@ from utils.partitions import Partition
 
 
 class APIClient:
-    def __init__(self, wallet=None):
+    def __init__(self, wallet=None, orchestrator_version: str = ""):
         self.base_url = f"{settings.ORCHESTRATOR_SCHEME}://{settings.ORCHESTRATOR_HOST}:{settings.ORCHESTRATOR_PORT}"
         self.session = None
         self.max_retries = 3
         self.retry_delay = 3.0  # seconds
         self.wallet = wallet
         self.failed_api_request = False
-        self.orchestrator_version = ""
+        self.orchestrator_version = orchestrator_version
 
     async def __aenter__(self):
         ssl = False if settings.ORCHESTRATOR_SCHEME == "http" else True
