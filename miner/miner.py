@@ -193,6 +193,8 @@ class Miner(BaseNeuron):
         """
         Reset the entire miner state, including the API client, health server, and all other state.
         """
+        logger.info(f"🔄 Resetting miner {self.hotkey[:8]} entire state")
+
         # Stop existing background tasks and services to prevent resource leaks.
         if getattr(self, "api_client", None):
             await self.api_client.__aexit__(None, None, None)
@@ -211,6 +213,8 @@ class Miner(BaseNeuron):
         # Replace the current object's state with the state of the new instance.
         # This effectively resets the object in place.
         self.__dict__ = new_miner.__dict__
+
+        logger.info(f"✅ Miner {self.hotkey[:8]} entire state reset")
 
     async def run(self):
         logger.info(f"🚀 Starting miner {self.hotkey[:8]} | Timeout: {self.TIMEOUT}s")
@@ -505,7 +509,7 @@ class Miner(BaseNeuron):
         Registers the miner with the orchestrator and returns the layer assigned to the miner
         """
         logger.info(f"🔗 Registering miner {self.hotkey[:8]} with orchestrator...")
-        self.layer: int = await self.api_client.register()
+        self.layer, self.orchestrator_version = await self.api_client.register()
         logger.info(f"✅ Successfully registered miner {self.hotkey[:8]} | Assigned to layer: {self.layer}")
 
     async def await_orchestrator_status(self, desired_status: MergingPhase):
@@ -540,7 +544,9 @@ class Miner(BaseNeuron):
                 logger.info(f"✅ Done waiting for orchestrator! Moving to next phase: {desired_status.value}")
                 break
             if desired_status == next_phase(orchestrator_status):
-                logger.info(f"✅ Correctly waiting for the next phase of the orchestrator: {orchestrator_status.value}")
+                logger.info(
+                    f"✅ Correctly waiting for the desired phase {(desired_status)}. State of the orchestrator: {orchestrator_status.value}"
+                )
                 await asyncio.sleep(1.5 if settings.MOCK else 10)
             else:
                 self.training = True  # always default back to training.
@@ -567,6 +573,20 @@ class Miner(BaseNeuron):
             flattened_optimizer_state, _, _ = flatten_optimizer_state(self.optimizer)
             weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
 
+            # Check to see if the weights or optimizer state have any nans
+            try:
+                for name, tensor in {"weights": weights, "optimizer_state": flattened_optimizer_state}.items():
+                    num_nans = torch.isnan(tensor).sum()
+                    if num_nans > 0:
+                        total = tensor.numel()
+                        percentage = (num_nans / total) * 100
+                        logger.error(
+                            f"❌ Miner {self.hotkey[:8]} has NaNs in {name} | {num_nans} / {total} = {percentage:.2f}%"
+                        )
+                        raise Exception(f"{name} has NaNs")
+            except Exception as e:
+                raise e
+
             logger.info(f"📤 Uploading weights and optimizer state | Sections: {num_sections}")
             (
                 weight_path,
@@ -584,7 +604,7 @@ class Miner(BaseNeuron):
             logger.debug(
                 f"Epoch {self.epoch}: Uploading weights to {weight_path} and metadata to {weight_metadata_path} and optimizer state to {optimizer_state_path} and metadata to {optimizer_state_metadata_path}"
             )
-            logger.debug(f"EPOCH {self.epoch}: UPLOADING WEIGHTS: {self.hotkey} | {self.layer} | {weights}")
+            logger.debug(f"EPOCH {self.epoch}: UPLOADING WEIGHTS: {self.hotkey} | layer {self.layer} | {weights}")
 
             logger.info("📤 Notifying orchestrator of uploaded weights...")
             success = await self.api_client.notify_weights_uploaded(

@@ -31,6 +31,7 @@ class APIClient:
         self.retry_delay = 3.0  # seconds
         self.wallet = wallet
         self.failed_api_request = False
+        self.orchestrator_version = ""
 
     async def __aenter__(self):
         ssl = False if settings.ORCHESTRATOR_SCHEME == "http" else True
@@ -67,6 +68,11 @@ class APIClient:
         body_bytes = create_message_body(body)
         # Generate Epistula headers
         headers = generate_header(self.wallet.hotkey, body_bytes)
+
+        # Add orchestrator version header if available
+        if self.orchestrator_version:
+            headers["X-Orchestrator-Version"] = self.orchestrator_version
+
         # Add headers to request
         if "headers" not in kwargs:
             kwargs["headers"] = {}
@@ -133,14 +139,18 @@ class APIClient:
 
         raise aiohttp.ClientError(f"Failed after {self.max_retries} attempts")
 
-    async def register(self) -> int:
+    async def register(self) -> tuple[int, str]:
         logger.info(f"🔗 API: Registering miner {self.wallet.hotkey.ss58_address[:8]}")
         response = await self._make_request("post", f"{self.base_url}/orchestrator/register", json={})
 
         try:
-            layer = MinerRegistrationResponse(**response).layer
+            response = MinerRegistrationResponse(**response)
+            layer = response.layer
+            orchestrator_version = response.version
+            # Store the orchestrator version for future requests
+            self.orchestrator_version = orchestrator_version
             logger.info(f"✅ API: Registration successful | Layer: {layer}")
-            return layer
+            return layer, orchestrator_version
         except Exception as e:
             logger.info(response)
             logger.exception(f"❌ API: Failed to register miner: {e}")
@@ -267,7 +277,7 @@ class APIClient:
         """
         logger.debug(f"🔍 API: Checking merge info for layer {layer}")
         response = await self._make_request("get", f"{self.base_url}/orchestrator/is_merging?layer={layer}")
-        logger.debug(f"✅ API: Merge info received | Status: {response.get('status', 'unknown')}")
+        logger.debug(f"✅ API: Merge info received | Received status: {response.get('status', 'unknown')}")
         return response
 
     async def is_activation_active(self, layer: int, activation_uid: int) -> bool:
@@ -303,10 +313,12 @@ class APIClient:
 
     async def register_validator(self, host: str, port: int, scheme: str = "http") -> Dict[str, Any]:
         """Register a validator with the orchestrator."""
-        return await self._make_request(
+        response = await self._make_request(
             "post",
             f"{self.base_url}/orchestrator/register_validator?host={host}&port={port}&scheme={scheme}",
         )
+        self.orchestrator_version = response
+        return response
 
     async def weight_partition_info(self):
         """Get the weight partition info for a given layer."""
