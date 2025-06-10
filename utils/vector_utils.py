@@ -51,3 +51,17 @@ def reconstruct_optimizer_state(flat_tensor, tensor_shapes, state_dict, optimize
 
     optimizer.load_state_dict(new_state_dict)
     return optimizer
+
+
+def check_for_nans(tensor, name: str | None = None):
+    # Check to see if the weights or optimizer state have any nans
+    tensor = tensor.to("cpu")
+    try:
+        num_nans = torch.isnan(tensor).sum()
+        if num_nans > 0:
+            total = tensor.numel()
+            percentage = (num_nans / total) * 100
+            logger.error(f"❌ Miner has NaNs in {name} | {num_nans} / {total} = {percentage:.2f}%")
+            raise Exception(f"{name} has NaNs")
+    except Exception as e:
+        raise e
