@@ -24,7 +24,7 @@ from utils.partitions import Partition
 
 
 class APIClient:
-    def __init__(self, wallet=None, orchestrator_version: str = ""):
+    def __init__(self, wallet=None, orchestrator_version: str = None):
         self.base_url = f"{settings.ORCHESTRATOR_SCHEME}://{settings.ORCHESTRATOR_HOST}:{settings.ORCHESTRATOR_PORT}"
         self.session = None
         self.max_retries = 3
@@ -57,7 +57,7 @@ class APIClient:
             return None
 
     async def get_global_miner_weights(self) -> dict[str, Any]:
-        return await self._make_request("get", f"{self.base_url}/orchestrator/global_miner_weights")
+        return await self._make_request("get", f"{self.base_url}/orchestrator/global_weights_of_miners")
 
     async def _make_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
         """Make an HTTP request with retry logic."""

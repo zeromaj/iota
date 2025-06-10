@@ -194,20 +194,30 @@ class BaseNeuron(BaseModel):
             new_optimizer_state = flat_tensor  # .to(torch.float16).detach().cpu().numpy(force=True)
 
             for partition in merged_partitions:
-                logger.info(
-                    f"Downloading shard {partition.weight_path!r} and metadata {partition.weight_metadata_path!r}"
-                )
-                weight_shard = download_weights_or_optimizer_state(
-                    partition.weight_path, partition=partition, data_type="weights"
-                )
-                shard_optimizer_state = download_weights_or_optimizer_state(
-                    partition.optimizer_state_path, partition=partition, data_type="optimizer_state"
-                )
+                try:
+                    logger.info(
+                        f"Downloading shard {partition.weight_path!r} and metadata {partition.weight_metadata_path!r}"
+                    )
+                    weight_shard = download_weights_or_optimizer_state(
+                        partition.weight_path, partition=partition, data_type="weights"
+                    )
+                    shard_optimizer_state = download_weights_or_optimizer_state(
+                        partition.optimizer_state_path, partition=partition, data_type="optimizer_state"
+                    )
+                    check_for_nans(weight_shard, f"weight shard downloaded for miner {self.hotkey[:8]}")
+                    check_for_nans(
+                        shard_optimizer_state, f"shard optimizer state downloaded for miner {self.hotkey[:8]}"
+                    )
 
-                new_weights[partition.weight_data.chunk_start_idx : partition.weight_data.chunk_end_idx] = weight_shard
-                new_optimizer_state[
-                    partition.optimizer_state_data.chunk_start_idx : partition.optimizer_state_data.chunk_end_idx
-                ] = shard_optimizer_state
+                    new_weights[
+                        partition.weight_data.chunk_start_idx : partition.weight_data.chunk_end_idx
+                    ] = weight_shard
+                    new_optimizer_state[
+                        partition.optimizer_state_data.chunk_start_idx : partition.optimizer_state_data.chunk_end_idx
+                    ] = shard_optimizer_state
+                except Exception as e:
+                    logger.error(f"Error downloading weights: {e}")
+                    raise
 
             # Check to make sure we didn't download any nans
             check_for_nans(new_weights, f"weights downloaded for miner {self.hotkey[:8]}")
@@ -285,7 +295,6 @@ class BaseNeuron(BaseModel):
         if self.layer is not None and self.layer > 0:
             input_activations.requires_grad_(True)
         self.model.to(DEVICE)
-        logger.warning(f"WEIGHTS: {torch.nn.utils.parameters_to_vector(self.model.parameters())}")
         output_activations = self.model(input_activations.to(DEVICE))
         return output_activations
 
@@ -298,6 +307,7 @@ class BaseNeuron(BaseModel):
         # If this is the last layer, then output_activations is the loss
         if self.layer == settings.N_LAYERS - 1:
             try:
+                check_for_nans(output_activations, f"output activations for miner {self.hotkey[:8]}")
                 output_activations.backward()
             except RuntimeError as e:
                 logger.error(f"Error during backward step: {e}")
@@ -588,6 +598,7 @@ class BaseNeuron(BaseModel):
     async def _load_data(self):
         if MOCK:
             mock_data = torch.randn(100, 100).to(DEVICE).to(torch.bfloat16)
+
             logger.info(f"Generated mock data sample of shape {mock_data.shape}")
             return mock_data
 
