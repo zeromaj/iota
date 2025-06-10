@@ -22,6 +22,7 @@ class MinerRegistrationResponse(BaseModel):
     hotkey: str
     layer: int | None = None
     message: str = "Successfully registered"
+    version: str | None = None
 
 
 class LayerAssignmentResponse(BaseModel):
