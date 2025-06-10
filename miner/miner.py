@@ -15,7 +15,6 @@ from base.base_neuron import BaseNeuron
 from miner.api_client import APIClient
 import settings
 from utils.s3_interactions import (
-    download_weights_or_optimizer_state,
     download_activation,
     upload_to_bucket,
     smart_upload_via_orchestrator_async,
@@ -265,26 +264,8 @@ class Miner(BaseNeuron):
                         try:
                             logger.info(f"🔄 Reregistering miner {self.hotkey[:8]}")
                             await self.register()
-
                             await self.load_model()
 
-                            self.reregister_needed = False
-
-                            continue
-                        except Exception as e:
-                            logger.error(f"❌ Error reregistering miner {self.uid}: {e}")
-                            continue
-
-                    if self.layer is None:
-                        try:
-                            response = await self.api_client.request_layer()
-                            self.layer = response.layer
-                            logger.info(f"🎯 Miner {self.uid} assigned to layer {self.layer}")
-
-                            # Load the model
-                            await self._load_model()
-
-                            # if there are global weights, download them
                             try:
                                 weights_path = await self.api_client.get_layer_weights(self.layer)
                             except Exception as e:
@@ -293,29 +274,13 @@ class Miner(BaseNeuron):
 
                             if weights_path:
                                 logger.info(f"📥 Loading existing weights for layer {self.layer}")
-                                self.weights = download_weights_or_optimizer_state(weights_path)
-                                assert isinstance(
-                                    self.weights, torch.Tensor
-                                ), f"Weights must on {weights_path} be a torch.Tensor but are {type(self.weights)}"
-                                # assign weights to self.model
-                                torch.nn.utils.vector_to_parameters(self.weights, self.model.parameters())
-                                logger.info(f"✅ Loaded existing weights for layer {self.layer}")
+                                await self.download_weights()
                             else:
-                                # if there are no global weights, generate random weights
-                                self.weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
-                                logger.info(f"🎲 Generated random weights for layer {self.layer}")
-                            logger.debug(f"Miner {self.uid} has weights: {self.weights}")
-                            await self._load_optimizer()
-                            await self._load_lr_scheduler_2()
+                                logger.info(
+                                    f"Weight path empty (None)... 🎲 Using random weights for layer {self.layer}"
+                                )
 
-                            # Load the tokenizer if this is the first
-                            if self.layer == 0:
-                                await self._load_tokenizer()
-                                await self._load_dataloader()
-
-                            # If this is the first or last stage, get the vocab info
-                            if self.layer == 0 or self.layer == settings.N_LAYERS - 1:
-                                await self._load_vocab_info()
+                            self.reregister_needed = False
 
                         except Exception as e:
                             logger.error(f"❌ Error loading model for miner {self.hotkey[:8]}: {e}")
