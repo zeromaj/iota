@@ -36,7 +36,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PACK_SAMPLES = True
 WEIGHT_DECAY = 1e-1
 GRAD_CLIP_NORM = 1.0
-LEARNING_RATE = 5 * 1e-4
+LEARNING_RATE = 2 * 1e-4
 TOTAL_TRAIN_STEPS = 100_000
 LR_WARMUP_START_FACTOR = 1  # 5e-3
 LR_WARMUP_STEPS = 1
@@ -48,7 +48,7 @@ USE_WANDB = False
 
 # MODEL MERGING
 MINER_MERGE_PARTITIONS = 0.3
-TARGET_EFFECTIVE_BATCH_SIZE = 4 if MOCK else 50
+TARGET_EFFECTIVE_BATCH_SIZE = 4 if MOCK else 500
 
 # swarm
 # MODEL_SPLITS = [[-1, 5], [5, 10], [10, -1]]  # For 1B models
@@ -64,7 +64,7 @@ MODEL_SPLITS = MOCK_MODEL_SPLITS if MOCK else REAL_MODEL_SPLITS
 
 N_LAYERS = len(MODEL_SPLITS)
 TIMEOUT = 20000000000000000
-PHASE_TIMEOUT = 60 * 60  # 1 hour
+PHASE_TIMEOUT = 60 * 60 * 3  # 1 hour
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 SYNC_WEIGHTS = os.getenv("SYNC_WEIGHTS") == "True"
@@ -96,7 +96,7 @@ VALIDATOR_HOSTS = (
     os.getenv("VALIDATOR_HOSTS", "localhost").strip().split(",") if os.getenv("VALIDATOR_HOSTS") else ["localhost"]
 )
 WEIGHT_SUBMIT_INTERVAL: int = 3600  # submit weight every 1 hour
-SCORE_VALIDITY_PERIOD = 5000 * 12  # should be equal to immunity period
+SCORE_VALIDITY_PERIOD = 3000 * 12  # should be equal to immunity period
 
 # Validation Thresholds
 COSINE_SIMILARITY_THRESHOLD = 0.9
@@ -168,7 +168,7 @@ if ENABLE_DASHBOARD_REPORTING:
 else:
     logger.info("Dashboard reporting is disabled")
 
-MINER_REPORT_INTERVAL = 180  # 3 minutes in seconds
+MINER_REPORT_INTERVAL = 60 if MOCK else 180
 MINER_ACTIVITY_TIMEOUT = (
     3600  # 1 hour in seconds - time after which a miner is considered inactive and its node changes in frontend
 )
@@ -212,14 +212,16 @@ MINER_HEALTH_ENDPOINT = os.getenv("MINER_HEALTH_ENDPOINT", "/health")
 
 LOCAL_OPTIMIZER_STEPS = 2 if MOCK else 10
 GLOBAL_OPTIMIZER_STEPS = 2 if MOCK else 10
-BURN_FACTOR = 2  # 1-1/BurnFactor % is burned, for 2 it's 50%
+BURN_FACTOR = 2  # 1-1/BurnFactor % is burned, for 5 it's 80%
 
 LIMIT = f"{1*len(MINER_HOTKEYS)}/second" if MOCK else "1/second"
 HIGH_LIMIT = f"{5*len(MINER_HOTKEYS)}/second" if MOCK else "10/second"
 
 MINERS_REQUIRED_FOR_WEIGHT_UPLOADING = 0.8
-ACTIVATIONS_REQUIRED_FOR_WEIGHT_MERGING_DECREASE_INTERVAL = 1 if MOCK else 30
-PARTITIONS_REQUIRED_FOR_WEIGHT_MERGING_DECREASE_INTERVAL = 1 if MOCK else 30
+ACTIVATIONS_REQUIRED_FOR_WEIGHT_MERGING_DECREASE_INTERVAL = (
+    1 if MOCK else 6
+)  # Decreases by 1%, so in this case takes 600 seconds = 10 minutes
+PARTITIONS_REQUIRED_FOR_WEIGHT_MERGING_DECREASE_INTERVAL = 1 if MOCK else 6
 
 MIN_ACTIVATION_SIZE = 100
 MAX_ACTIVATION_SIZE = 1000000000
