@@ -317,7 +317,7 @@ class APIClient:
             "post",
             f"{self.base_url}/orchestrator/register_validator?host={host}&port={port}&scheme={scheme}",
         )
-        self.orchestrator_version = response
+        self.orchestrator_version = str(response.get("version"))
         return response
 
     async def weight_partition_info(self):
