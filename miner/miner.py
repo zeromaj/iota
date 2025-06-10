@@ -22,7 +22,7 @@ from utils.s3_interactions import (
 )
 from utils.shared_states import MergingPhase
 from utils.partitions import ChunkData, Partition
-from utils.vector_utils import flatten_optimizer_state
+from utils.vector_utils import check_for_nans, flatten_optimizer_state
 from orchestrator.serializers import SubmittedWeights
 from storage.serializers import ActivationResponse
 
@@ -575,6 +575,11 @@ class Miner(BaseNeuron):
 
             # Check to see if the weights or optimizer state have any nans
             try:
+                # Store original device and move tensors to CPU
+                original_device = weights.device
+                weights = weights.cpu()
+                flattened_optimizer_state = flattened_optimizer_state.cpu()
+
                 for name, tensor in {"weights": weights, "optimizer_state": flattened_optimizer_state}.items():
                     num_nans = torch.isnan(tensor).sum()
                     if num_nans > 0:
@@ -584,6 +589,11 @@ class Miner(BaseNeuron):
                             f"❌ Miner {self.hotkey[:8]} has NaNs in {name} | {num_nans} / {total} = {percentage:.2f}%"
                         )
                         raise Exception(f"{name} has NaNs")
+
+                # Move tensors back to original device
+                weights = weights.to(original_device)
+                flattened_optimizer_state = flattened_optimizer_state.to(original_device)
+
             except Exception as e:
                 raise e
 
@@ -1207,6 +1217,8 @@ class Miner(BaseNeuron):
         epoch: int,
     ) -> tuple[str, str, str]:
         # Convert to NumPy array and save in raw binary format
+        check_for_nans(flattened_weights, f"uploading weights for miner {miner_hotkey}")
+        check_for_nans(flattened_optimizer_state, f"uploading optimizer state for miner {miner_hotkey}")
         weight_path, weight_metadata_path = await self.upload_tensor_with_metadata(
             flattened_weights, miner_hotkey, num_sections, epoch, "weights"
         )
