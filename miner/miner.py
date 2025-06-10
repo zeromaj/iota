@@ -575,6 +575,11 @@ class Miner(BaseNeuron):
 
             # Check to see if the weights or optimizer state have any nans
             try:
+                # Store original device and move tensors to CPU
+                original_device = weights.device
+                weights = weights.cpu()
+                flattened_optimizer_state = flattened_optimizer_state.cpu()
+
                 for name, tensor in {"weights": weights, "optimizer_state": flattened_optimizer_state}.items():
                     num_nans = torch.isnan(tensor).sum()
                     if num_nans > 0:
@@ -584,6 +589,11 @@ class Miner(BaseNeuron):
                             f"❌ Miner {self.hotkey[:8]} has NaNs in {name} | {num_nans} / {total} = {percentage:.2f}%"
                         )
                         raise Exception(f"{name} has NaNs")
+
+                # Move tensors back to original device
+                weights = weights.to(original_device)
+                flattened_optimizer_state = flattened_optimizer_state.to(original_device)
+
             except Exception as e:
                 raise e
 
