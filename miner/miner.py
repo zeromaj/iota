@@ -4,6 +4,7 @@ import random
 import time
 import uuid
 import json
+import sys
 import io
 from typing import Literal, Any, Optional
 
@@ -26,6 +27,7 @@ from utils.partitions import ChunkData, Partition
 from utils.vector_utils import check_for_nans, flatten_optimizer_state
 from orchestrator.serializers import SubmittedWeights
 from storage.serializers import ActivationResponse
+from utils.bt_utils import NotRegisteredError
 
 
 WAIT_TIME = 5 if settings.MOCK else 15
@@ -103,7 +105,13 @@ class Miner(BaseNeuron):
             TIMEOUT=timeout,
             N_LAYERS=n_layers,
         )
-        await miner.initialize()
+        try:
+            await miner.initialize()
+        except NotRegisteredError as e:
+            logger.error(f"Miner not registered: {e}")
+            # Wait for 10 minutes and then quit the program if this happens
+            await asyncio.sleep(600)
+            sys.exit("Miner not registered")
         return miner
 
     @property
