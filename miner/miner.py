@@ -1,7 +1,10 @@
 import asyncio
+import copy
+import random
 import time
 import uuid
 import json
+import sys
 import io
 from typing import Literal, Any, Optional
 
@@ -24,6 +27,7 @@ from utils.partitions import ChunkData, Partition
 from utils.vector_utils import check_for_nans, flatten_optimizer_state
 from orchestrator.serializers import SubmittedWeights
 from storage.serializers import ActivationResponse
+from utils.bt_utils import NotRegisteredError
 
 
 WAIT_TIME = 5 if settings.MOCK else 15
@@ -101,7 +105,13 @@ class Miner(BaseNeuron):
             TIMEOUT=timeout,
             N_LAYERS=n_layers,
         )
-        await miner.initialize()
+        try:
+            await miner.initialize()
+        except NotRegisteredError as e:
+            logger.error(f"Miner not registered: {e}")
+            # Wait for 10 minutes and then quit the program if this happens
+            await asyncio.sleep(600)
+            sys.exit("Miner not registered")
         return miner
 
     @property
@@ -917,12 +927,8 @@ class Miner(BaseNeuron):
                 f"🚀 Starting FORWARD pass for layer {self.layer} | Processing activation {activation_uid} | Miner: {self.hotkey[:8]}"
             )
 
-            try:
-                input_activations = download_activation(path=input_activation_path)
-                logger.debug(f"📥 Downloaded activation from {input_activation_path}")
-            except Exception as e:
-                logger.error(f"❌ Error downloading activation: {e}")
-                return
+            input_activations = download_activation(path=input_activation_path)
+            logger.debug(f"📥 Downloaded activation from {input_activation_path}")
 
         output_activations, state = await self._forward(input_activations)
 
@@ -935,12 +941,8 @@ class Miner(BaseNeuron):
                     f"❌ No input activation path found for layer {self.layer}, miner {self.hotkey[:8]} is idle. For activation {activation_uid} and layer path {initial_activations_path} was returned"
                 )
                 return
-            try:
-                initial_activations = download_activation(path=initial_activations_path)
-                logger.debug(f"📥 Downloaded initial activation from {initial_activations_path}")
-            except Exception as e:
-                logger.error(f"❌ Error downloading initial activation: {e}")
-                return
+            initial_activations = download_activation(path=initial_activations_path)
+            logger.debug(f"📥 Downloaded initial activation from {initial_activations_path}")
 
             output_activations = model_utils.compute_loss(
                 logits=output_activations,
@@ -1074,6 +1076,16 @@ class Miner(BaseNeuron):
     async def upload_activation(self, uid: str, layer: int, direction: str, data: torch.Tensor) -> str:
         """Upload an activation to S3 storage using orchestrator-coordinated multipart upload."""
         assert isinstance(data, torch.Tensor), f"Activation is not a torch.Tensor: {type(data)}"
+        check_for_nans(data, f"activation {uid} uploaded by miner {self.hotkey[:8]}")
+
+        # With a 10% chance, mutate the activation to contain a NaN
+        if settings.MOCK:
+            if random.random() < 0.1:  # 10% chance
+                data = copy.deepcopy(data)
+                # Randomly select an index to mutate to NaN
+                logger.warning(f"Mutating activation {uid}, layer {layer}, direction {direction} to contain a NaN")
+                i, j = random.randint(0, data.shape[0] - 1), random.randint(0, data.shape[1] - 1)
+                data[i, j] = float("nan")
 
         # Generate the S3 path
         path = f"activations/{uid}/{layer}/{direction}/{uuid.uuid4()}.pt"

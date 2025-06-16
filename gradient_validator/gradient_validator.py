@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 import time
 from typing import Literal
 
@@ -27,6 +28,7 @@ from settings import (
     WEIGHT_MAGNITUDE_THRESHOLD,
 )
 from storage.serializers import StorageResponse, ValidationEvent
+from utils.bt_utils import NotRegisteredError
 from utils.s3_interactions import download_activation, download_weights_or_optimizer_state
 from utils.vector_utils import flatten_optimizer_state
 
@@ -45,7 +47,13 @@ class GradientValidator(BaseNeuron):
     async def create(cls):
         """Factory method to create and initialize a GradientValidator instance"""
         validator = cls()
-        await validator.initialize()  # Initialize the base class
+        try:
+            await validator.initialize()  # Initialize the base class
+        except NotRegisteredError as e:
+            logger.error("Validator not registered, waiting for 10 minutes and then quitting")
+            # Quit the program if this happens
+            await asyncio.sleep(600)
+            sys.exit("Validator not registered")
         validator.metagraph_syncer.register_listener(validator._on_metagraph_updated, netuids=[validator.netuid])
         while True:
             if await validator.api_client.health_check():

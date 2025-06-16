@@ -6,7 +6,6 @@ import boto3
 import numpy as np
 from dotenv import load_dotenv
 from loguru import logger
-from botocore import UNSIGNED
 from botocore.exceptions import ClientError
 from urllib.parse import urlparse
 import settings
@@ -18,6 +17,7 @@ from typing import Any, Literal
 import asyncio
 import aiohttp
 from utils.partitions import Partition
+from utils.vector_utils import check_for_nans
 
 
 # Load environment variables
@@ -687,6 +687,7 @@ def download_activation(path: str) -> torch.Tensor:
 
     tensor = torch.load(buffer, weights_only=False)
     assert isinstance(tensor, torch.Tensor), f"Downloaded tensor is not a torch.Tensor: {type(tensor)}, path: {path}"
+    check_for_nans(tensor, f"activation downloaded from {path}")
     return tensor
 
 
@@ -696,20 +697,6 @@ def download_weights_or_optimizer_state(
     data_type: Literal["weights", "optimizer_state"] = "weights",
 ) -> torch.Tensor:
     """Download weights from S3 storage."""
-    # if not settings.USE_S3 or not s3_client:
-    #     # For local storage, read the file directly
-    #     with open(path, "rb") as f:
-    #         if partition.chunk_start_byte is not None and partition.chunk_end_byte is not None:
-    #             f.seek(partition.chunk_start_byte)
-    #             binary_data = f.read(partition.chunk_end_byte - partition.chunk_start_byte)
-    #         else:
-    #             binary_data = f.read()
-    #     section_numpy = np.frombuffer(binary_data, dtype=np.uint8)
-    #     section_torch = torch.from_numpy(section_numpy.copy())
-    #     section_torch = section_torch.view(getattr(torch, partition.chunk_dtype))
-    #     logger.info(f"Downloaded partition {partition} of {path!r}")
-    #     return section_torch
-
     bucket, path = normalize_s3_path(path)
 
     if data_type == "weights":
@@ -832,6 +819,189 @@ def file_exists(path: str) -> bool:
                 raise
     else:
         return Path(path).exists()
+
+
+def verify_file_size(path: str, min_size: int = 0, max_size: int = np.inf) -> bool:
+    """
+    Verify the size of a file is within a given range.
+    """
+    if not file_exists(path):
+        return False
+    size = get_file_size(path)
+
+    if min_size <= size <= max_size:
+        return True
+    else:
+        logger.warning(f"File size is not within min/max ({min_size}/{max_size}) range: {path} ({size} bytes)")
+        return False
+
+
+def get_file_size(path: str) -> int:
+    """
+    Get the size of a file in bytes, works with both S3 and local files.
+
+    Args:
+        path: The path to check. Can be either an S3 path (s3://bucket/key) or a local path.
+
+    Returns:
+        int: The file size in bytes.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        ValueError: If S3 is not available for S3 paths.
+    """
+    parsed = urlparse(path)
+
+    if parsed.scheme == "s3":
+        if not settings.USE_S3 or not s3_client:
+            raise ValueError(f"S3 client not available, cannot get size of S3 path: {path}")
+
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        try:
+            response = s3_client.head_object(Bucket=bucket, Key=key)
+            size = response.get("ContentLength", 0)
+            logger.debug(f"S3 file size for {path}: {size} bytes")
+            return size
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code == "404":
+                raise FileNotFoundError(f"S3 file not found: {path}")
+            else:
+                logger.error(f"Error getting file size from S3: {e}")
+                raise
+    else:
+        file_path = Path(path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Local file not found: {path}")
+
+        size = file_path.stat().st_size
+        logger.debug(f"Local file size for {path}: {size} bytes")
+        return size
+
+
+def compare_files_sampled(path1: str, path2: str, sample_percentage: float, num_samples: int = 10) -> float:
+    """
+    Compare two files by sampling random byte ranges and calculating bit-level agreement rate.
+
+    Args:
+        path1: First file path (can be S3 or local)
+        path2: Second file path (can be S3 or local)
+        sample_percentage: Percentage of file to sample (0.0 to 100.0)
+        num_samples: Number of byte ranges to sample (default 10)
+
+    Returns:
+        float: Agreement rate as percentage (0.0 to 100.0)
+
+    Raises:
+        ValueError: If files have different sizes or invalid percentage/samples
+        FileNotFoundError: If either file doesn't exist
+    """
+    import random
+
+    if not (0.0 <= sample_percentage <= 100.0):
+        raise ValueError(f"Sample percentage must be between 0.0 and 100.0, got {sample_percentage}")
+
+    if num_samples < 1:
+        raise ValueError(f"Number of samples must be at least 1, got {num_samples}")
+
+    # Get file sizes
+    size1 = get_file_size(path1)
+    size2 = get_file_size(path2)
+
+    if size1 != size2:
+        raise ValueError(f"Files have different sizes: {path1} ({size1} bytes) vs {path2} ({size2} bytes)")
+
+    if size1 == 0:
+        logger.info("Both files are empty, returning 100% agreement")
+        return 100.0
+
+    # Calculate total bytes to sample
+    total_bytes = size1
+    sample_bytes = max(1, int(total_bytes * sample_percentage / 100.0))
+
+    # Calculate bytes per range
+    bytes_per_range = max(1, sample_bytes // num_samples)
+
+    logger.info(f"Comparing {path1} and {path2}")
+    logger.info(f"File size: {total_bytes} bytes")
+    logger.info(f"Sampling {sample_bytes} bytes ({sample_percentage}%) across {num_samples} ranges")
+    logger.info(f"Bytes per range: {bytes_per_range}")
+
+    # Generate random starting positions for each range
+    max_start_pos = total_bytes - bytes_per_range
+    range_starts = sorted(random.sample(range(max_start_pos), min(num_samples, max_start_pos + 1)))
+
+    # Generate ranges to sample
+    ranges = [(start, start + bytes_per_range - 1) for start in range_starts]
+
+    # Download sampled bytes from both files
+    data1 = _download_byte_ranges(path1, ranges)
+    data2 = _download_byte_ranges(path2, ranges)
+
+    # Compare bit by bit
+    total_bits = 0
+    matching_bits = 0
+
+    for byte1, byte2 in zip(data1, data2):
+        for bit_pos in range(8):
+            bit1 = (byte1 >> bit_pos) & 1
+            bit2 = (byte2 >> bit_pos) & 1
+            total_bits += 1
+            if bit1 == bit2:
+                matching_bits += 1
+
+    agreement_rate = (matching_bits / total_bits) * 100.0 if total_bits > 0 else 100.0
+
+    logger.info(f"Agreement rate: {agreement_rate:.2f}% ({matching_bits}/{total_bits} bits match)")
+    return agreement_rate
+
+
+def _download_byte_ranges(path: str, ranges: list[tuple[int, int]]) -> bytes:
+    """
+    Download specific byte ranges from a file.
+
+    Args:
+        path: File path (S3 or local)
+        ranges: List of (start, end) tuples representing byte ranges to download
+
+    Returns:
+        bytes: The requested bytes in order
+    """
+    parsed = urlparse(path)
+
+    if parsed.scheme == "s3":
+        if not settings.USE_S3 or not s3_client:
+            raise ValueError(f"S3 client not available, cannot download from S3 path: {path}")
+
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+
+        result = bytearray()
+        for start, end in ranges:
+            byte_range = f"bytes={start}-{end}"
+            try:
+                response = s3_client.get_object(Bucket=bucket, Key=key, Range=byte_range)
+                chunk_data = response["Body"].read()
+                result.extend(chunk_data)
+
+            except ClientError as e:
+                logger.error(f"Error downloading byte range {byte_range} from S3: {e}")
+                raise
+
+        return bytes(result)
+
+    else:
+        # Local file
+        file_path = Path(path)
+        result = bytearray()
+
+        with open(file_path, "rb") as f:
+            for start, end in ranges:
+                f.seek(start)
+                result.extend(f.read(end - start + 1))
+
+        return bytes(result)
 
 
 # Initialize S3 client on import
