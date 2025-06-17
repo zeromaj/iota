@@ -1,3 +1,4 @@
+from loguru import logger
 import torch
 from torch.optim import Optimizer
 
