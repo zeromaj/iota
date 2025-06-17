@@ -100,7 +100,7 @@ class MinerRegistry(BaseModel):
     def __init__(self, miner_hotkeys: List[str], **data):
         super().__init__(**data)
         for miner_hotkey in miner_hotkeys:
-            self.add_miner_to_registry(miner_hotkey = miner_hotkey)
+            self.add_miner_to_registry(miner_hotkey=miner_hotkey)
 
     def add_miner_to_registry(self, miner_hotkey: str, layer: int | None = None, uid: int | None = None) -> None:
         """Adds a miner to the registry with default values.
@@ -109,7 +109,7 @@ class MinerRegistry(BaseModel):
             miner_hotkey: The hotkey of the miner
             layer: Optional layer assignment for the miner
             uid: Optional uid assignment for the miner
-            """
+        """
         miner_data = MinerData(hotkey=miner_hotkey, layer=layer, uid=uid)
         self.registry[miner_hotkey] = miner_data
 

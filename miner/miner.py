@@ -1253,7 +1253,7 @@ class Miner(BaseNeuron):
                     # Model configuration
                     "model_name": settings.MODEL_CFG["model_name"],
                     "n_layers": settings.N_LAYERS,
-                    #"miners_per_layer": settings.MINERS_PER_LAYER,
+                    # "miners_per_layer": settings.MINERS_PER_LAYER,
                     "model_splits": settings.MODEL_SPLITS,
                     # Training hyperparameters
                     "batch_size": settings.BATCH_SIZE,
