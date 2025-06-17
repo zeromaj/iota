@@ -701,8 +701,8 @@ class Miner(BaseNeuron):
             logger.debug(f"Miner {self.hotkey} merging chunk {chunk_id} from {len(information_packets)} miners")
             weight_average = None
             optimizer_state_average = None
-            weight_counter = 1
-            optimizer_state_counter = 1
+            weight_counter = 0
+            optimizer_state_counter = 0
             weight_start_idx, weight_end_idx = None, None
             optimizer_state_start_idx, optimizer_state_end_idx = None, None
 
@@ -1253,7 +1253,7 @@ class Miner(BaseNeuron):
                     # Model configuration
                     "model_name": settings.MODEL_CFG["model_name"],
                     "n_layers": settings.N_LAYERS,
-                    "miners_per_layer": settings.MINERS_PER_LAYER,
+                    # "miners_per_layer": settings.MINERS_PER_LAYER,
                     "model_splits": settings.MODEL_SPLITS,
                     # Training hyperparameters
                     "batch_size": settings.BATCH_SIZE,
@@ -1273,7 +1273,7 @@ class Miner(BaseNeuron):
                     # Model merging configuration
                     "local_optimizer_steps": settings.LOCAL_OPTIMIZER_STEPS,
                     "global_optimizer_steps": settings.GLOBAL_OPTIMIZER_STEPS,
-                    "miners_required_for_merging": settings.MINERS_REQUIRED_FOR_MERGING,
+                    "miners_required_for_merging": settings.MINERS_REQUIRED_FOR_WEIGHT_UPLOADING,
                     # Runtime configuration
                     "device": str(settings.DEVICE),
                     "mock_mode": settings.MOCK,
