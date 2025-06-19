@@ -5,11 +5,17 @@ from typing import Annotated
 from utils.bt_utils import verify_entity_type
 from fastapi import APIRouter, HTTPException, Depends, Header, Request
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 import settings
 from orchestrator.orchestrator import orchestrator
 from utils.epistula import EpistulaHeaders, create_message_body
+from utils.auth import (
+    AuthenticatedRequest,
+    validate_authenticated_request,
+    validate_validator_request,
+    validate_orchestrator_time,
+    get_signed_by_key,
+)
 from utils.partitions import Partition
 from utils.s3_interactions import generate_presigned_url
 from storage.activation_storage import ActivationStore
@@ -35,19 +41,6 @@ from utils.s3_interactions import (
 from utils.shared_states import MergingPhase
 
 
-def get_signed_by_key(request: Request) -> str:
-    """Get the signed_by key for rate limiting. Falls back to IP address if not authenticated."""
-    try:
-        # Try to get signed_by from request headers
-        signed_by = request.headers.get("Epistula-Signed-By")
-        if signed_by:
-            return signed_by
-    except Exception:
-        pass
-    # Fall back to IP address for unauthenticated endpoints
-    return get_remote_address(request)
-
-
 # Initialize rate limiter
 hotkey_limiter = Limiter(key_func=get_signed_by_key)
 
@@ -66,28 +59,17 @@ router = APIRouter(prefix="/storage")
 async def upload_activation_to_orchestrator(
     request: Request,  # Required for rate limiting
     activation_request: ActivationUploadRequest,
-    version: Annotated[str, Header(alias="Epistula-Version")],
-    timestamp: Annotated[str, Header(alias="Epistula-Timestamp")],
-    uuid: Annotated[str, Header(alias="Epistula-Uuid")],
-    signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
-    request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    auth: AuthenticatedRequest = Depends(validate_authenticated_request),
     storage_instances: tuple[ActivationStore, WeightStore] = Depends(get_storage_instances),
 ):
     with logger.contextualize(
         activation_uid=activation_request.activation_uid,
         layer=activation_request.layer,
         direction=activation_request.direction,
-        miner_hotkey=signed_by,
+        miner_hotkey=auth.signed_by,
         request_id=str(uuid4()),
     ):
-        headers = EpistulaHeaders(
-            version=version,
-            timestamp=timestamp,
-            uuid=uuid,
-            signed_by=signed_by,
-            request_signature=request_signature,
-        )
-        error = headers.verify_signature_v2(create_message_body(activation_request.model_dump()), time.time())
+        error = auth.headers.verify_signature_v2(create_message_body(activation_request.model_dump()), time.time())
         if error:
             raise HTTPException(status_code=401, detail=f"Epistula verification failed: {error}")
 
@@ -95,7 +77,7 @@ async def upload_activation_to_orchestrator(
         if settings.BITTENSOR:
             # Verify the entity exists in metagraph (accept both miners and validators)
             entity_info = verify_entity_type(
-                signed_by=signed_by,
+                signed_by=auth.signed_by,
                 metagraph=orchestrator.metagraph,
                 required_type=None,  # Allow both miners and validators to upload
             )
@@ -115,7 +97,7 @@ async def upload_activation_to_orchestrator(
         entity_type = entity_info["entity_type"] if entity_info else "unknown"
         entity_uid = entity_info["uid"] if entity_info else "unknown"
         logger.info(
-            f"{entity_type.capitalize()} {entity_uid} ({signed_by}) "
+            f"{entity_type.capitalize()} {entity_uid} ({auth.signed_by}) "
             f"uploading activation for activation_uid {activation_request.activation_uid} layer {activation_request.layer}"
         )
 
@@ -126,7 +108,7 @@ async def upload_activation_to_orchestrator(
                 layer=activation_request.layer,
                 direction=activation_request.direction,
                 activation_path=activation_request.activation_path,
-                miner_hotkey=signed_by,
+                miner_hotkey=auth.signed_by,
             )
             return StorageResponse(message="Activation uploaded successfully", data={"path": path})
         except Exception as e:
@@ -143,8 +125,12 @@ async def download_activation(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
     storage_instances: tuple[ActivationStore, WeightStore] = Depends(get_storage_instances),
 ):
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
+
     try:
         headers = EpistulaHeaders(
             version=version,
@@ -211,8 +197,11 @@ async def get_random_activation(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
 ):
     """Get a random activation without exposing the full list to the miner."""
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
 
     try:
         miner = orchestrator.miner_registry.get_miner_data(signed_by)
@@ -271,8 +260,12 @@ async def get_activation_stats(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
     storage_instances: tuple[ActivationStore, WeightStore] = Depends(get_storage_instances),
 ):
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
+
     with logger.contextualize(
         activation_uid=None,
         layer=orchestrator.miner_registry.get_miner_data(signed_by).layer,
@@ -322,8 +315,12 @@ async def is_activation_active(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
     storage_instances: tuple[ActivationStore, WeightStore] = Depends(get_storage_instances),
 ):
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
+
     with logger.contextualize(
         activation_uid=None,
         layer=orchestrator.miner_registry.get_miner_data(signed_by).layer,
@@ -367,8 +364,12 @@ async def get_weights(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
     storage_instances: tuple[ActivationStore, WeightStore] = Depends(get_storage_instances),
 ):
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
+
     with logger.contextualize(
         activation_uid=None,
         layer=orchestrator.miner_registry.get_miner_data(signed_by).layer,
@@ -415,8 +416,12 @@ async def list_miners(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
     storage_instances: tuple[ActivationStore, WeightStore] = Depends(get_storage_instances),
 ):
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
+
     with logger.contextualize(
         activation_uid=None,
         layer=orchestrator.miner_registry.get_miner_data(signed_by).layer,
@@ -459,40 +464,29 @@ async def list_miners(
 @hotkey_limiter.limit(settings.LIMIT, per_method=True)
 async def delete_weights(
     request: Request,  # Required for rate limiting
-    version: Annotated[str, Header(alias="Epistula-Version")],
-    timestamp: Annotated[str, Header(alias="Epistula-Timestamp")],
-    uuid: Annotated[str, Header(alias="Epistula-Uuid")],
-    signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
-    request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    auth: AuthenticatedRequest = Depends(validate_validator_request),
     storage_instances: tuple[ActivationStore, WeightStore] = Depends(get_storage_instances),
 ):
     with logger.contextualize(
         activation_uid=None,
-        layer=orchestrator.miner_registry.get_miner_data(signed_by).layer,
-        hotkey=signed_by,
+        layer=orchestrator.miner_registry.get_miner_data(auth.signed_by).layer,
+        hotkey=auth.signed_by,
         request_id=str(uuid4()),
     ):
-        validator_hotkey = signed_by
-        headers = EpistulaHeaders(
-            version=version,
-            timestamp=timestamp,
-            uuid=uuid,
-            signed_by=signed_by,
-            request_signature=request_signature,
-        )
-        error = headers.verify_signature_v2(create_message_body({}), time.time())
+        validator_hotkey = auth.signed_by
+        error = auth.headers.verify_signature_v2(create_message_body({}), time.time())
         if error:
             raise HTTPException(status_code=401, detail=f"Epistula verification failed: {error}")
 
         if settings.BITTENSOR:
             # Verify the entity is a validator (only validators should delete weights)
             verify_entity_type(
-                signed_by=signed_by,
+                signed_by=auth.signed_by,
                 metagraph=orchestrator.metagraph,
                 required_type="validator",
             )
 
-        logger.info(f"Validator({signed_by[:8]}) deleting weights for miner {validator_hotkey[:8]}...")
+        logger.info(f"Validator({auth.signed_by[:8]}) deleting weights for miner {validator_hotkey[:8]}...")
 
         _, weight_store = storage_instances
         try:
@@ -509,41 +503,28 @@ async def delete_weights(
 async def set_layer_weights(
     request: Request,  # Required for rate limiting
     weight_request: WeightLayerRequest,
-    version: Annotated[str, Header(alias="Epistula-Version")],
-    timestamp: Annotated[str, Header(alias="Epistula-Timestamp")],
-    uuid: Annotated[str, Header(alias="Epistula-Uuid")],
-    signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
-    request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    auth: AuthenticatedRequest = Depends(validate_validator_request),
     storage_instances: tuple[ActivationStore, WeightStore] = Depends(get_storage_instances),
 ):
     with logger.contextualize(
         activation_uid=None,
-        layer=orchestrator.miner_registry.get_miner_data(signed_by).layer,
-        hotkey=signed_by,
+        layer=orchestrator.miner_registry.get_miner_data(auth.signed_by).layer,
+        hotkey=auth.signed_by,
         request_id=str(uuid4()),
     ):
-        headers = EpistulaHeaders(
-            version=version,
-            timestamp=timestamp,
-            uuid=uuid,
-            signed_by=signed_by,
-            request_signature=request_signature,
-        )
-        error = headers.verify_signature_v2(create_message_body(weight_request.model_dump()), time.time())
+        error = auth.headers.verify_signature_v2(create_message_body(weight_request.model_dump()), time.time())
         if error:
             raise HTTPException(status_code=401, detail=f"Epistula verification failed: {error}")
 
-        entity_info = None
         if settings.BITTENSOR:
-            # Verify the entity is a validator (only validators should set layer weights)
+            # Get entity info for logging
             entity_info = verify_entity_type(
-                signed_by=signed_by,
+                signed_by=auth.signed_by,
                 metagraph=orchestrator.metagraph,
                 required_type="validator",
             )
-
-        entity_uid = entity_info["uid"] if entity_info else "unknown"
-        logger.info(f"Validator {entity_uid} ({signed_by}) setting layer {weight_request.layer} weights")
+            entity_uid = entity_info["uid"] if entity_info else "unknown"
+            logger.info(f"Validator {entity_uid} ({auth.signed_by}) setting layer {weight_request.layer} weights")
 
         _, weight_store = storage_instances
         try:
@@ -566,8 +547,12 @@ async def get_layer_weights(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
     storage_instances: tuple[ActivationStore, WeightStore] = Depends(get_storage_instances),
 ) -> list[Partition]:
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
+
     with logger.contextualize(
         activation_uid=None,
         layer=layer,
@@ -619,6 +604,7 @@ async def get_presigned_url(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
 ):
     """Generate a presigned URL for S3 operations.
 
@@ -630,6 +616,9 @@ async def get_presigned_url(
     Returns:
         PresignedUrlResponse containing the URL and any additional fields
     """
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
+
     with logger.contextualize(
         activation_uid=None,
         layer=orchestrator.miner_registry.get_miner_data(signed_by).layer,
@@ -689,8 +678,12 @@ async def initiate_multipart_upload(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
 ):
     """Initiate a multipart upload and return presigned URLs for parts."""
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
+
     headers = EpistulaHeaders(
         version=version,
         timestamp=timestamp,
@@ -785,8 +778,12 @@ async def complete_multipart_upload_endpoint(
     uuid: Annotated[str, Header(alias="Epistula-Uuid")],
     signed_by: Annotated[str, Header(alias="Epistula-Signed-By")],
     request_signature: Annotated[str, Header(alias="Epistula-Request-Signature")],
+    orchestrator_time: Annotated[str, Header(alias="X-Orchestrator-Version")],
 ):
     """Complete a multipart upload."""
+    # Validate orchestrator version
+    validate_orchestrator_time(orchestrator_time, orchestrator.orchestrator_time)
+
     headers = EpistulaHeaders(
         version=version,
         timestamp=timestamp,

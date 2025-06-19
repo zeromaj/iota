@@ -667,27 +667,34 @@ async def smart_upload_via_orchestrator_async(
         raise
 
 
-def download_activation(path: str) -> torch.Tensor:
+def download_activation(path: str, device: str = settings.DEVICE) -> torch.Tensor:
     """Download an activation from S3 storage."""
     if not settings.USE_S3 or not s3_client:
         # For local storage, read the file directly
         with open(path, "rb") as f:
             buffer = io.BytesIO(f.read())
-        tensor = torch.load(buffer, weights_only=False)
+        tensor = torch.load(buffer, weights_only=False, map_location=device)
         assert isinstance(
             tensor, torch.Tensor
         ), f"Downloaded tensor is not a torch.Tensor: {type(tensor)}, path: {path}"
-        return tensor
 
-    bucket, path = normalize_s3_path(path)
+    else:
+        bucket, path = normalize_s3_path(path)
 
-    # Download from S3
-    response = s3_client.get_object(Bucket=bucket, Key=path)
-    buffer = io.BytesIO(response["Body"].read())
+        # Download from S3
+        response = s3_client.get_object(Bucket=bucket, Key=path)
+        buffer = io.BytesIO(response["Body"].read())
 
-    tensor = torch.load(buffer, weights_only=False)
-    assert isinstance(tensor, torch.Tensor), f"Downloaded tensor is not a torch.Tensor: {type(tensor)}, path: {path}"
-    check_for_nans(tensor, f"activation downloaded from {path}")
+        tensor = torch.load(buffer, weights_only=False, map_location=device)
+        assert isinstance(
+            tensor, torch.Tensor
+        ), f"Downloaded tensor is not a torch.Tensor: {type(tensor)}, path: {path}"
+        check_for_nans(tensor, f"activation downloaded from {path}")
+
+    # Ensure tensor is on the correct device
+    if str(tensor.device) != device:
+        tensor = tensor.to(device)
+
     return tensor
 
 
@@ -740,7 +747,7 @@ def download_optimizer_state(path: str) -> dict[str, Any]:
     bucket, path = normalize_s3_path(path)
     response = s3_client.get_object(Bucket=bucket, Key=path)
     buffer = io.BytesIO(response["Body"].read())
-    return torch.load(buffer, weights_only=False)
+    return torch.load(buffer, weights_only=False, map_location=settings.DEVICE)
 
 
 def list_all_files(prefix: str = "") -> list[str]:

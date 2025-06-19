@@ -67,7 +67,7 @@ class GradientValidator(BaseNeuron):
             port=int(settings.VALIDATOR_EXTERNAL_PORT),
             scheme=settings.VALIDATOR_SCHEME,
         )
-        validator.orchestrator_version = str(response.get("version"))
+        validator.orchestrator_time = str(response.get("version"))
         return validator
 
     def _on_metagraph_updated(self, metagraph: bt.metagraph, netuid: int):
@@ -166,7 +166,7 @@ class GradientValidator(BaseNeuron):
                 self.miner_weights[self.tracked_miner] -= PENALTY_RATE
                 return False, torch.Tensor([0]), "no-activation-path"
 
-            activations = download_activation(activation_path)
+            activations = download_activation(activation_path, device=DEVICE)
             # Handle backward pass early
             if direction == "backward":
                 logger.debug(f"GRADIENT VALIDATOR [MINER {self.tracked_miner}]: BACKWARD PASS, LAYER {self.layer}")
@@ -183,7 +183,7 @@ class GradientValidator(BaseNeuron):
                     delete=False,
                     fetch_historic=True,
                 )
-                initial_activations = download_activation(response.data["path"]).to(DEVICE)
+                initial_activations = download_activation(response.data["path"], device=DEVICE)
                 if not MOCK:
                     output_activations = model_utils.compute_loss(
                         logits=validator_activations,
@@ -218,7 +218,7 @@ class GradientValidator(BaseNeuron):
                 self.miner_weights[self.tracked_miner] -= PENALTY_RATE
                 return False, torch.Tensor([0]), "no-activation-path"
 
-            miner_activations = download_activation(miner_response.data["path"])
+            miner_activations = download_activation(miner_response.data["path"], device=DEVICE)
 
             # Validate and store results
             is_valid, score, reason = await self.validate_activations(
@@ -255,7 +255,8 @@ class GradientValidator(BaseNeuron):
                     fetch_historic=True,
                 )
                 backward_activations = response.data["path"]
-                backward_activations = download_activation(backward_activations).to(DEVICE)
+                backward_activations = download_activation(backward_activations, device=DEVICE)
+
             # TODO: If a new miner is being tracked, we may not have the forward activations in the GradientValidator
             # as they were computed in the miner before we started tracking it. We need to handle this case.
             try:
@@ -297,7 +298,8 @@ class GradientValidator(BaseNeuron):
 
             logger.debug(f"MINER ACTIVATIONS: {miner_activations}")
 
-            miner_activations = download_activation(path=miner_activations.data["path"])
+            miner_activations = download_activation(path=miner_activations.data["path"], device=DEVICE)
+
             is_valid, score, reason = await self.validate_activations(
                 validator_activations=input_activation_grads,
                 miner_activations=miner_activations.to(DEVICE),
@@ -650,7 +652,7 @@ class GradientValidator(BaseNeuron):
             # Save validation events to file before resetting
             await self._save_validation_events()
 
-            self.api_client = APIClient(self.wallet, orchestrator_version=self.orchestrator_version)
+            self.api_client = APIClient(self.wallet, orchestrator_time=self.orchestrator_time)
             await self.api_client.__aenter__()
 
             # The orchestrator tracks all the miner weights in uid space, but in the validator, we use self.tracked_miner which is a hotkey.

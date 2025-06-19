@@ -7,7 +7,6 @@ from loguru import logger
 from model.configs import LLAMA32_CONFIG_15B, LLAMA32_CONFIG_100M
 
 DOTENV_PATH = os.getenv("DOTENV_PATH", ".env")
-
 if not load_dotenv(dotenv_path=DOTENV_PATH):
     # raise ValueError("No .env file found")
     logger.warning("No .env file found")
@@ -27,7 +26,7 @@ BITTENSOR = os.getenv("BITTENSOR") == "True"
 DATASET_NAME = "HuggingFaceFW/fineweb"
 SHUFFLE_DATASET = True
 
-ACTIVATION_CACHE_TIMEOUT = 60 * 5
+ACTIVATION_CACHE_TIMEOUT = 60 * 20
 
 # Training
 BATCH_SIZE = 1
@@ -48,7 +47,7 @@ USE_WANDB = False
 
 # MODEL MERGING
 MINER_MERGE_PARTITIONS = 0.3
-TARGET_EFFECTIVE_BATCH_SIZE = 4 if MOCK else 500
+TARGET_EFFECTIVE_BATCH_SIZE = 30 if MOCK else 500
 
 # swarm
 # MODEL_SPLITS = [[-1, 5], [5, 10], [10, -1]]  # For 1B models
@@ -138,46 +137,7 @@ wallet_hotkey = os.getenv("wallet_hotkey", "m1")
 MINER_HOTKEYS_ENV = os.getenv("MINER_HOTKEYS")
 MINER_HOTKEYS = MINER_HOTKEYS_ENV.strip().split(",") if MINER_HOTKEYS_ENV is not None else [wallet_hotkey]
 netuid = int(os.getenv("netuid", "9"))
-__spec_version__ = 4062
-# ==============================================
-# DASHBOARD
-DASHBOARD_ENV = os.getenv("DASHBOARD_ENV", "prod").lower()  # "prod" or "staging"
-DASHBOARD_BASE_URL = os.getenv(f"{DASHBOARD_ENV.upper()}_DASHBOARD_BASE_URL", "https://swarm.api.macrocosmos.ai/")
-DASHBOARD_ACCESS_KEY = os.getenv(f"{DASHBOARD_ENV.upper()}_DASHBOARD_ACCESS_KEY")
-ENABLE_DASHBOARD_REPORTING = os.getenv("ENABLE_DASHBOARD_REPORTING", "True") == "True"
-
-# Controls whether dashboard-related logs are printed to the terminal
-DASHBOARD_LOGS = os.getenv("DASHBOARD_LOGS", "True") == "True"
-
-# Validate dashboard environment if reporting is enabled
-if ENABLE_DASHBOARD_REPORTING:
-    if not (DASHBOARD_ENV == "prod" or DASHBOARD_ENV == "staging"):
-        raise ValueError(f"Invalid DASHBOARD_ENV: {DASHBOARD_ENV}. Must be 'prod' or 'staging'.")
-
-    # Validate that required dashboard settings are present
-    if not DASHBOARD_BASE_URL:
-        logger.warning(
-            f"Dashboard reporting enabled but no DASHBOARD_BASE_URL found for environment '{DASHBOARD_ENV.upper()}'"
-        )
-    if not DASHBOARD_ACCESS_KEY:
-        logger.warning(
-            f"Dashboard reporting enabled but no DASHBOARD_ACCESS_KEY found for environment '{DASHBOARD_ENV.upper()}'"
-        )
-
-    logger.info(f"Dashboard reporting enabled for {DASHBOARD_ENV} environment: {DASHBOARD_BASE_URL}")
-else:
-    logger.info("Dashboard reporting is disabled")
-
-MINER_REPORT_INTERVAL = 60 if MOCK else 180
-MINER_ACTIVITY_TIMEOUT = (
-    3600  # 1 hour in seconds - time after which a miner is considered inactive and its node changes in frontend
-)
-MAX_RETRIES = 3
-RETRY_DELAY = 1  # seconds
-# ==============================================
-logger.info(
-    f"Settings: \n{DOTENV_PATH=}\n{BITTENSOR=}\n{VALIDATE=}\n{MOCK=}\n{ORCHESTRATOR_URL=}\n{VALIDATOR_COUNT=}\n{VALIDATOR_HOSTS=}\n{VALIDATOR_PORTS=}\n{WEIGHT_SUBMIT_INTERVAL=}\n{COSINE_SIMILARITY_THRESHOLD=}\n{ACTIVATION_MAGNITUDE_THRESHOLD=}\n{WEIGHT_MAGNITUDE_THRESHOLD=}\n{DASHBOARD_BASE_URL=}\n{ENABLE_DASHBOARD_REPORTING=}\n{MINER_REPORT_INTERVAL=}\n{MINER_ACTIVITY_TIMEOUT=}\n{MAX_RETRIES=}\n{RETRY_DELAY=}\n{netuid=}\n{__spec_version__=}\n{DASHBOARD_ENV=}\n{DASHBOARD_LOGS=}"
-)
+__spec_version__ = 4063
 
 # Weights & Biases
 WANDB_PROJECT = "pretrain-test"
@@ -212,7 +172,7 @@ MINER_HEALTH_ENDPOINT = os.getenv("MINER_HEALTH_ENDPOINT", "/health")
 
 LOCAL_OPTIMIZER_STEPS = 2 if MOCK else 10
 GLOBAL_OPTIMIZER_STEPS = 2 if MOCK else 10
-BURN_FACTOR = 1.25 # 1-1/BurnFactor % is burned, for 5 it's 80%
+BURN_FACTOR = 1.25  # 1-1/BurnFactor % is burned, for 5 it's 80%
 
 LIMIT = f"{1*len(MINER_HOTKEYS)}/second" if MOCK else "1/second"
 HIGH_LIMIT = f"{5*len(MINER_HOTKEYS)}/second" if MOCK else "10/second"

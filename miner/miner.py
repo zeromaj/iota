@@ -275,7 +275,6 @@ class Miner(BaseNeuron):
                             logger.info(f"🔄 Reregistering miner {self.hotkey[:8]}")
                             await self.register()
                             await self.load_model()
-
                             try:
                                 weights_path = await self.api_client.get_layer_weights(self.layer)
                             except Exception as e:
@@ -350,7 +349,10 @@ class Miner(BaseNeuron):
                 for activation_uid, activation_data in list(self.saved_forward_activations.items()):
                     upload_time = activation_data[-1]
                     if upload_time < time.time() - settings.ACTIVATION_CACHE_TIMEOUT:
+                        # Explicitly remove tensor references to help the gc
+                        del activation_data
                         del self.saved_forward_activations[activation_uid]
+
                         logger.warning(
                             f"🗑️ Removed activation {activation_uid} from miner {self.hotkey[:8]} cache due to timeout"
                         )
@@ -484,7 +486,7 @@ class Miner(BaseNeuron):
         Registers the miner with the orchestrator and returns the layer assigned to the miner
         """
         logger.info(f"🔗 Registering miner {self.hotkey[:8]} with orchestrator...")
-        self.layer, self.orchestrator_version = await self.api_client.register()
+        self.layer, self.orchestrator_time = await self.api_client.register_miner()
         logger.info(f"✅ Successfully registered miner {self.hotkey[:8]} | Assigned to layer: {self.layer}")
 
     async def await_orchestrator_status(self, desired_status: MergingPhase):
@@ -927,7 +929,7 @@ class Miner(BaseNeuron):
                 f"🚀 Starting FORWARD pass for layer {self.layer} | Processing activation {activation_uid} | Miner: {self.hotkey[:8]}"
             )
 
-            input_activations = download_activation(path=input_activation_path)
+            input_activations = download_activation(path=input_activation_path, device=settings.DEVICE)
             logger.debug(f"📥 Downloaded activation from {input_activation_path}")
 
         output_activations, state = await self._forward(input_activations)
@@ -941,7 +943,8 @@ class Miner(BaseNeuron):
                     f"❌ No input activation path found for layer {self.layer}, miner {self.hotkey[:8]} is idle. For activation {activation_uid} and layer path {initial_activations_path} was returned"
                 )
                 return
-            initial_activations = download_activation(path=initial_activations_path)
+
+            initial_activations = download_activation(path=initial_activations_path, device=settings.DEVICE)
             logger.debug(f"📥 Downloaded initial activation from {initial_activations_path}")
 
             output_activations = model_utils.compute_loss(
@@ -1011,9 +1014,8 @@ class Miner(BaseNeuron):
             # For backward pass, we need to get activations that we have cached forward activations for
             # So we still need to list first, then filter, then randomly select
             activation_grads_path = activation.activation_path
-            activation_grads = download_activation(path=activation_grads_path)
 
-            activation_grads = activation_grads.to(settings.DEVICE)
+            activation_grads = download_activation(path=activation_grads_path, device=settings.DEVICE)
 
             logger.debug(f"📥 Downloaded activation gradients from {activation_grads_path}")
 
@@ -1234,6 +1236,7 @@ class Miner(BaseNeuron):
             )
 
     async def start(self) -> asyncio.Task:
+        asyncio.create_task(self.is_registered_loop())
         return asyncio.create_task(self.run())
 
     async def _log_wandb(self, metrics: dict):
