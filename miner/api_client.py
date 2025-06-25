@@ -19,7 +19,6 @@ from orchestrator.serializers import (
     LossReportRequest,
     LossReportResponse,
     MinerRegistrationResponse,
-    LayerAssignmentResponse,
 )
 from utils.partitions import Partition
 
@@ -188,13 +187,6 @@ class APIClient:
         response = await self._make_request("post", f"{self.base_url}/orchestrator/miners/status", json=data)
         return response
 
-    async def request_layer(self) -> LayerAssignmentResponse:
-        logger.info("🔗 API: Requesting layer assignment")
-        response = await self._make_request("post", f"{self.base_url}/orchestrator/miners/request_layer")
-        result = LayerAssignmentResponse(**response)
-        logger.info(f"✅ API: Layer assignment received | Layer: {result.layer}")
-        return result
-
     async def report_loss(self, activation_uid: str, loss: float) -> LossReportResponse:
         logger.debug(f"📊 API: Reporting loss {loss:.6f} for activation {activation_uid}")
         data = LossReportRequest(activation_uid=activation_uid, loss_value=loss)
@@ -311,7 +303,7 @@ class APIClient:
         self,
         path: str,
         expires_in: int = 3600,
-    ) -> dict[str, str]:
+    ) -> str:
         """Get a presigned URL for S3 operations."""
         if not settings.USE_S3:
             return {
