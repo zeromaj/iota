@@ -7,7 +7,6 @@ import numpy as np
 from dotenv import load_dotenv
 from loguru import logger
 from botocore.exceptions import ClientError
-from urllib.parse import urlparse
 import settings
 from pathlib import Path
 import requests
@@ -35,24 +34,24 @@ def initialize_s3():
         logger.info("S3 storage disabled, using local file system")
         return
 
-    if not settings.AWS_ACCESS_KEY_ID or not settings.AWS_SECRET_ACCESS_KEY:
+    if not settings.R2_ACCESS_KEY_ID or not settings.R2_SECRET_ACCESS_KEY:
         logger.warning("AWS credentials not found. Using default credentials.")
-        s3_client = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+        s3_client = boto3.client("s3", config=Config(signature_version=UNSIGNED), endpoint_url=settings.R2_ENDPOINT)
     else:
         s3_client = boto3.client(
             "s3",
-            region_name=settings.AWS_REGION,
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            config=Config(signature_version="s3v4"),
+            region_name=settings.R2_REGION,
+            aws_access_key_id=settings.R2_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.R2_SECRET_ACCESS_KEY,
+            endpoint_url=settings.R2_ENDPOINT,
         )
 
-    logger.info(f"S3 client initialized with bucket: {settings.S3_BUCKET}")
+    logger.info(f"S3 client initialized with bucket: {settings.R2_BUCKET}")
 
 
 def normalize_s3_path(path: str) -> tuple[str, str]:
     """Fix any s3:/bucket/path errors to s3://bucket/path"""
-    bucket = settings.S3_BUCKET
+    bucket = settings.R2_BUCKET
     if path.startswith("s3:/") and not path.startswith("s3://"):
         path = path.replace("s3:/", "s3://", 1)
 
@@ -73,39 +72,17 @@ def normalize_s3_path(path: str) -> tuple[str, str]:
     return bucket, path
 
 
-def generate_presigned_url(
-    path: str,
-    expires_in: int = 3600,
-) -> dict[str, Any]:
-    assert path is not None, "path must be provided to generate_presigned_url"
-
-    if not settings.USE_S3 or not s3_client:
-        # Return local path format for non-S3 usage
-        return {"url": path, "fields": {}}
-
-    try:
-        response = s3_client.generate_presigned_post(
-            Bucket=settings.S3_BUCKET,
-            Key=path,
-            ExpiresIn=expires_in,
-        )
-        return response
-    except ClientError as e:
-        logger.error(f"Error generating presigned URL: {e}")
-        raise
-
-
-def upload_to_bucket(presigned_data: dict[str, Any], files: dict[str, Any]) -> str:
-    response = requests.post(presigned_data["url"], data=presigned_data["fields"], files=files)
+def upload_to_bucket(presigned_data: str, files: dict[str, Any]) -> str:
+    response = requests.put(presigned_data, data=files["file"][1])
 
     if response.status_code != 204 and response.status_code != 200:
         logger.error(f"Failed to upload file to S3: {response.status_code} {response.text}")
         response.raise_for_status()
 
     # Get the S3 path from the presigned URL
-    key = presigned_data["fields"]["key"]
+    key = presigned_data.replace(f"{settings.R2_ENDPOINT}/{settings.R2_BUCKET}/", "").split("?")[0]
     logger.debug(f"Uploaded to S3: {key}")
-    return f"s3://{settings.S3_BUCKET}/{key}"
+    return key
 
 
 def create_multipart_upload(path: str) -> str:
@@ -115,7 +92,7 @@ def create_multipart_upload(path: str) -> str:
 
     try:
         response = s3_client.create_multipart_upload(
-            Bucket=settings.S3_BUCKET,
+            Bucket=settings.R2_BUCKET,
             Key=path,
         )
         upload_id = response["UploadId"]
@@ -126,26 +103,23 @@ def create_multipart_upload(path: str) -> str:
         raise
 
 
-def generate_presigned_url_for_part(path: str, upload_id: str, part_number: int, expires_in: int = 3600) -> str:
-    """Generate a presigned URL for uploading a specific part."""
+def generate_presigned_url(path: str, method: str, expires_in: int = 3600, **metadata) -> str:
     if not settings.USE_S3 or not s3_client:
         raise ValueError("S3 is not enabled or client not initialized")
 
     try:
         response = s3_client.generate_presigned_url(
-            ClientMethod="upload_part",
+            ClientMethod=method,
             Params={
-                "Bucket": settings.S3_BUCKET,
+                "Bucket": settings.R2_BUCKET,
                 "Key": path,
-                "UploadId": upload_id,
-                "PartNumber": part_number,
+                **metadata,
             },
             ExpiresIn=expires_in,
         )
-        logger.debug(f"Generated presigned URL for part {part_number} of upload {upload_id}")
         return response
     except ClientError as e:
-        logger.error(f"Error generating presigned URL for part: {e}")
+        logger.error(f"Error generating presigned URL: {e}")
         raise
 
 
@@ -171,13 +145,13 @@ def complete_multipart_upload(path: str, upload_id: str, parts: list[dict[str, A
 
     try:
         response = s3_client.complete_multipart_upload(
-            Bucket=settings.S3_BUCKET,
+            Bucket=settings.R2_BUCKET,
             Key=path,
             UploadId=upload_id,
             MultipartUpload={"Parts": parts},
         )
         logger.debug(f"Completed multipart upload for {path}")
-        return f"s3://{settings.S3_BUCKET}/{path}"
+        return path
     except ClientError as e:
         logger.error(f"Error completing multipart upload: {e}")
         raise
@@ -190,7 +164,7 @@ def abort_multipart_upload(path: str, upload_id: str):
 
     try:
         s3_client.abort_multipart_upload(
-            Bucket=settings.S3_BUCKET,
+            Bucket=settings.R2_BUCKET,
             Key=path,
             UploadId=upload_id,
         )
@@ -222,7 +196,7 @@ def upload_large_file_multipart(data: bytes, path: str, part_size: int = 100 * 1
     if len(data) <= part_size:
         logger.debug(f"File size {len(data)} bytes is small enough for single-part upload")
         buffer = io.BytesIO(data)
-        presigned_data = generate_presigned_url(path=path)
+        presigned_data = generate_presigned_url(path=path, method="put_object")
         return upload_to_bucket(presigned_data, {"file": ("data", buffer)})
 
     logger.info(f"Starting multipart upload for {path} ({len(data)} bytes, {part_size} bytes per part)")
@@ -245,7 +219,9 @@ def upload_large_file_multipart(data: bytes, path: str, part_size: int = 100 * 1
             logger.debug(f"Uploading part {part_number}/{total_parts} ({len(part_data)} bytes)")
 
             # Generate presigned URL for this part
-            presigned_url = generate_presigned_url_for_part(path, upload_id, part_number)
+            presigned_url = generate_presigned_url(
+                path=path, method="upload_part", UploadId=upload_id, PartNumber=part_number
+            )
 
             # Upload the part
             etag = upload_part_to_s3(presigned_url, part_data)
@@ -349,7 +325,7 @@ async def upload_large_file_multipart_async(
     if len(data) <= part_size:
         logger.debug(f"File size {len(data)} bytes is small enough for single-part upload")
         buffer = io.BytesIO(data)
-        presigned_data = generate_presigned_url(path=path)
+        presigned_data = generate_presigned_url(path=path, method="put_object")
         return upload_to_bucket(presigned_data, {"file": ("data", buffer)})
 
     logger.info(f"Starting async multipart upload for {path} ({len(data)} bytes, {part_size} bytes per part)")
@@ -370,7 +346,9 @@ async def upload_large_file_multipart_async(
             part_data = data[start_byte:end_byte]
 
             # Generate presigned URL for this part
-            presigned_url = generate_presigned_url_for_part(path, upload_id, part_number)
+            presigned_url = generate_presigned_url(
+                path=path, method="upload_part", UploadId=upload_id, PartNumber=part_number
+            )
 
             # Create task for uploading this part
             part_tasks.append(
@@ -452,7 +430,7 @@ def smart_upload_to_s3(data: bytes, path: str, use_async: bool = True, part_size
     else:
         # Use regular single-part upload
         buffer = io.BytesIO(data)
-        presigned_data = generate_presigned_url(path=path)
+        presigned_data = generate_presigned_url(path=path, method="put_object")
         return upload_to_bucket(presigned_data, {"file": ("data", buffer)})
 
 
@@ -472,7 +450,7 @@ async def smart_upload_to_s3_async(data: bytes, path: str, part_size: int = 100 
     else:
         # Use regular single-part upload
         buffer = io.BytesIO(data)
-        presigned_data = generate_presigned_url(path=path)
+        presigned_data = generate_presigned_url(path=path, method="put_object")
         return upload_to_bucket(presigned_data, {"file": ("data", buffer)})
 
 
@@ -652,7 +630,9 @@ async def smart_upload_via_orchestrator_async(
         # Complete the multipart upload via orchestrator
         completion_result = await api_client.complete_multipart_upload(path=path, upload_id=upload_id, parts=parts)
 
-        s3_path = completion_result["s3_path"]
+        s3_path = (
+            completion_result["s3_path"].replace(f"{settings.R2_ENDPOINT}/{settings.R2_BUCKET}/", "").split("?")[0]
+        )
         logger.info(f"Successfully completed orchestrator-coordinated multipart upload for {path}")
         return s3_path
 
@@ -679,13 +659,11 @@ def download_activation(path: str, device: str = settings.DEVICE) -> torch.Tenso
         ), f"Downloaded tensor is not a torch.Tensor: {type(tensor)}, path: {path}"
 
     else:
-        bucket, path = normalize_s3_path(path)
-
         # Download from S3
-        response = s3_client.get_object(Bucket=bucket, Key=path)
-        buffer = io.BytesIO(response["Body"].read())
-
+        response = requests.get(path)
+        buffer = io.BytesIO(response.content)
         tensor = torch.load(buffer, weights_only=False, map_location=device)
+
         assert isinstance(
             tensor, torch.Tensor
         ), f"Downloaded tensor is not a torch.Tensor: {type(tensor)}, path: {path}"
@@ -704,7 +682,6 @@ def download_weights_or_optimizer_state(
     data_type: Literal["weights", "optimizer_state"] = "weights",
 ) -> torch.Tensor:
     """Download weights from S3 storage."""
-    bucket, path = normalize_s3_path(path)
 
     if data_type == "weights":
         data = partition.weight_data
@@ -716,12 +693,13 @@ def download_weights_or_optimizer_state(
     # if partition is not specified, download the full tensor
     if data.chunk_start_byte is None or data.chunk_end_byte is None:
         logger.warning(f"Chunk {partition.chunk_number} has no start or end byte")
-        response = s3_client.get_object(Bucket=bucket, Key=path)
+        response = requests.get(path)
+
     else:
         byte_range = f"bytes={data.chunk_start_byte}-{data.chunk_end_byte-1}"
-        response = s3_client.get_object(Bucket=bucket, Key=path, Range=byte_range)
+        response = requests.get(path, headers={"Range": byte_range})
 
-    binary_data = response["Body"].read()
+    binary_data = response.content
     section_numpy = np.frombuffer(binary_data, dtype=np.uint8)
     section_torch = torch.from_numpy(section_numpy.copy())
     # assumes default dtype if not specified
@@ -737,16 +715,14 @@ def download_metadata(path: str) -> dict[str, Any]:
         with open(path, "r") as f:
             return json.loads(f.read())
 
-    bucket, path = normalize_s3_path(path)
-    response = s3_client.get_object(Bucket=bucket, Key=path)
-    return json.loads(response["Body"].read())
+    response = requests.get(path)
+    return json.loads(response.content)
 
 
 def download_optimizer_state(path: str) -> dict[str, Any]:
     """Download optimizer state from S3 storage."""
-    bucket, path = normalize_s3_path(path)
-    response = s3_client.get_object(Bucket=bucket, Key=path)
-    buffer = io.BytesIO(response["Body"].read())
+    response = requests.get(path)
+    buffer = io.BytesIO(response.content)
     return torch.load(buffer, weights_only=False, map_location=settings.DEVICE)
 
 
@@ -756,7 +732,7 @@ def list_all_files(prefix: str = "") -> list[str]:
         return os.listdir()
 
     try:
-        response = s3_client.list_objects_v2(Bucket=settings.S3_BUCKET, Prefix=prefix)
+        response = s3_client.list_objects_v2(Bucket=settings.R2_BUCKET, Prefix=prefix)
         if "Contents" in response:
             return [obj["Key"] for obj in response["Contents"]]
         return []
@@ -771,17 +747,9 @@ def list_all_files(prefix: str = "") -> list[str]:
 def delete(path: str):
     """Delete a file from local disk or S3."""
 
-    parsed = urlparse(path)
-
-    if parsed.scheme == "s3":
-        if not s3_client:
-            logger.warning(f"S3 client not available, cannot delete S3 path: {path}")
-            return
-
-        bucket = parsed.netloc
-        key = parsed.path.lstrip("/")
+    if settings.USE_S3 and s3_client:
         try:
-            s3_client.delete_object(Bucket=bucket, Key=key)
+            s3_client.delete_object(Bucket=settings.R2_BUCKET, Key=path)
             logger.debug(f"Deleted from S3: {path}")
         except Exception as e:
             logger.exception(f"Failed to delete from S3: {path}")
@@ -805,17 +773,9 @@ def file_exists(path: str) -> bool:
     Returns:
         bool: True if the file exists, False otherwise.
     """
-    parsed = urlparse(path)
-
-    if parsed.scheme == "s3":
-        if not settings.USE_S3 or not s3_client:
-            logger.warning(f"S3 client not available, cannot check S3 path: {path}")
-            return False
-
-        bucket = parsed.netloc
-        key = parsed.path.lstrip("/")
+    if settings.USE_S3 and s3_client:
         try:
-            s3_client.head_object(Bucket=bucket, Key=key)
+            s3_client.head_object(Bucket=settings.R2_BUCKET, Key=path)
             return True
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
@@ -857,16 +817,12 @@ def get_file_size(path: str) -> int:
         FileNotFoundError: If the file doesn't exist.
         ValueError: If S3 is not available for S3 paths.
     """
-    parsed = urlparse(path)
-
-    if parsed.scheme == "s3":
+    if settings.USE_S3 and s3_client:
         if not settings.USE_S3 or not s3_client:
             raise ValueError(f"S3 client not available, cannot get size of S3 path: {path}")
 
-        bucket = parsed.netloc
-        key = parsed.path.lstrip("/")
         try:
-            response = s3_client.head_object(Bucket=bucket, Key=key)
+            response = s3_client.head_object(Bucket=settings.R2_BUCKET, Key=path)
             size = response.get("ContentLength", 0)
             logger.debug(f"S3 file size for {path}: {size} bytes")
             return size
@@ -975,20 +931,15 @@ def _download_byte_ranges(path: str, ranges: list[tuple[int, int]]) -> bytes:
     Returns:
         bytes: The requested bytes in order
     """
-    parsed = urlparse(path)
-
-    if parsed.scheme == "s3":
+    if settings.USE_S3 and s3_client:
         if not settings.USE_S3 or not s3_client:
             raise ValueError(f"S3 client not available, cannot download from S3 path: {path}")
-
-        bucket = parsed.netloc
-        key = parsed.path.lstrip("/")
 
         result = bytearray()
         for start, end in ranges:
             byte_range = f"bytes={start}-{end}"
             try:
-                response = s3_client.get_object(Bucket=bucket, Key=key, Range=byte_range)
+                response = s3_client.get_object(Bucket=settings.R2_BUCKET, Key=path, Range=byte_range)
                 chunk_data = response["Body"].read()
                 result.extend(chunk_data)
 
