@@ -73,7 +73,7 @@ DEFAULT_AWS_REGION = "eu-north-1"
 AWS_REGION = os.getenv("AWS_REGION", DEFAULT_AWS_REGION)
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
-R2_ENDPOINT = "https://c3e628c65898759897b33b55e56bb7a0.r2.cloudflarestorage.com" 
+R2_ENDPOINT = "https://c3e628c65898759897b33b55e56bb7a0.r2.cloudflarestorage.com"
 R2_REGION = "enam"
 R2_BUCKET = "iota-prod-enam"
 # API
@@ -141,7 +141,7 @@ wallet_hotkey = os.getenv("wallet_hotkey", "m1")
 MINER_HOTKEYS_ENV = os.getenv("MINER_HOTKEYS")
 MINER_HOTKEYS = MINER_HOTKEYS_ENV.strip().split(",") if MINER_HOTKEYS_ENV is not None else [wallet_hotkey]
 netuid = int(os.getenv("netuid", "9"))
-__spec_version__ = 4064
+__spec_version__ = 4065
 
 # Weights & Biases
 WANDB_PROJECT = "pretrain-test"
