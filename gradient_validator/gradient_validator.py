@@ -113,8 +113,6 @@ class GradientValidator(BaseNeuron):
             self.weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
             logger.warning(f"Using default weights for miner {miner_hotkey} because of error: {e}")
 
-        if self.lr_scheduler is None:
-            await self._load_lr_scheduler_2()
         if self.layer == 0 or self.layer == N_LAYERS - 1:
             await self._load_vocab_info()
         logger.debug(f"GRADIENT VALIDATOR TRACKING MINER {miner_hotkey}")
