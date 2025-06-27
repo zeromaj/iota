@@ -10,7 +10,6 @@ from typing import Literal, Any, Optional
 
 import torch
 from loguru import logger
-import wandb
 from aiohttp import web
 
 import model.utils as model_utils
@@ -138,7 +137,7 @@ class Miner(BaseNeuron):
             # Load the model
             await self._load_model()
             await self._load_optimizer()
-            await self._load_lr_scheduler_2()
+            # await self._load_lr_scheduler_2()
 
             # Load the tokenizer if this is the first
             if self.layer == 0:
@@ -994,11 +993,8 @@ class Miner(BaseNeuron):
             try:
                 await self.backward(activation=activation)
 
-                # Log the loss and other training state information to wandb.
-                # This is used for monitoring the loss during testing
-                if settings.USE_WANDB:
-                    metrics = {"loss": float(output_activations.item())}
-                    await self._log_wandb(metrics)
+                # Notice this instance variable is defined only for miners on the last layer
+                self.losses_since_reduce.append(float(output_activations.item()))
 
             except Exception as e:
                 logger.exception(f"❌ Error during backward step on last layer: {e}")
@@ -1251,65 +1247,3 @@ class Miner(BaseNeuron):
     async def start(self) -> asyncio.Task:
         asyncio.create_task(self.is_registered_loop())
         return asyncio.create_task(self.run())
-
-    async def _log_wandb(self, metrics: dict):
-        """
-        Logs the metrics along with other training state information to wandb
-        """
-        # Log loss to wandb
-        if not self.wandb_initialized:
-            if settings.WANDB_TOKEN:
-                wandb.login(key=settings.WANDB_TOKEN)
-
-            wandb.init(
-                project=settings.WANDB_PROJECT,
-                entity=settings.WANDB_ENTITY,
-                name=f"{settings.RUN_NAME}",
-                config={
-                    # Model configuration
-                    "model_name": settings.MODEL_CFG["model_name"],
-                    "n_layers": settings.N_LAYERS,
-                    # "miners_per_layer": settings.MINERS_PER_LAYER,
-                    "model_splits": settings.MODEL_SPLITS,
-                    # Training hyperparameters
-                    "batch_size": settings.BATCH_SIZE,
-                    "sequence_length": settings.SEQUENCE_LENGTH,
-                    "total_train_steps": settings.TOTAL_TRAIN_STEPS,
-                    "weight_decay": settings.WEIGHT_DECAY,
-                    "pack_samples": settings.PACK_SAMPLES,
-                    "learning_rate": settings.LEARNING_RATE,
-                    "lr_warmup_start_factor": settings.LR_WARMUP_START_FACTOR,
-                    "lr_warmup_steps": settings.LR_WARMUP_STEPS,
-                    "lr_const_steps": settings.LR_CONST_STEPS,
-                    "lr_tail_steps_frac": settings.LR_TAIL_STEPS_FRAC,
-                    "lr_final_factor": settings.LR_FINAL_FACTOR,
-                    "lr_saw_cycle_length": settings.LR_SAW_CYCLE_LENGTH,
-                    # Dataset
-                    "dataset_name": settings.DATASET_NAME,
-                    # Model merging configuration
-                    "local_optimizer_steps": settings.LOCAL_OPTIMIZER_STEPS,
-                    "global_optimizer_steps": settings.GLOBAL_OPTIMIZER_STEPS,
-                    "miners_required_for_merging": settings.MINERS_REQUIRED_FOR_WEIGHT_UPLOADING,
-                    # Runtime configuration
-                    "device": str(settings.DEVICE),
-                    "mock_mode": settings.MOCK,
-                    "completed_optim_steps": self.completed_optim_steps,
-                },
-            )
-            self.wandb_initialized = True
-
-        # load globa gradient norm
-        total_grad_norm = torch.sqrt(
-            sum(p.grad.detach().pow(2).sum() for p in self.model.parameters() if p.grad is not None)
-        )
-
-        # Extract loss from the metrics dictionary
-        loss = metrics["loss"]
-
-        wandb.log(
-            {
-                "loss": float(loss),
-                "learning_rate": self.optimizer.param_groups[0]["lr"],
-                "grads/global_norm": float(total_grad_norm.item()),
-            }
-        )

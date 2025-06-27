@@ -187,6 +187,10 @@ class APIClient:
         response = await self._make_request("post", f"{self.base_url}/orchestrator/miners/status", json=data)
         return response
 
+    async def request_learning_rate(self) -> float:
+        learning_rate = await self._make_request("get", f"{self.base_url}/orchestrator/request_learning_rate")
+        return learning_rate
+
     async def report_loss(self, activation_uid: str, loss: float) -> LossReportResponse:
         logger.debug(f"📊 API: Reporting loss {loss:.6f} for activation {activation_uid}")
         data = LossReportRequest(activation_uid=activation_uid, loss_value=loss)

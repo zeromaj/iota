@@ -19,6 +19,7 @@ from utils.vector_utils import (
     reconstruct_optimizer_state,
 )
 from transformers import PreTrainedTokenizer, AutoTokenizer
+import wandb
 
 from miner.api_client import APIClient
 from model.loaders import load_model_split, load_dataloader
@@ -80,6 +81,7 @@ class BaseNeuron(BaseModel):
     completed_optim_steps: int = 0
     saved_forward_activations: dict[str, tuple[torch.Tensor, torch.Tensor, float]] = Field(default_factory=dict)
     layer: int | None = None
+    losses_since_reduce: list[float] = Field(default_factory=list)
     backwards_since_reduce: int = 0
     backwards_since_sync: int = 0
     weights: torch.Tensor | None = None
@@ -87,7 +89,7 @@ class BaseNeuron(BaseModel):
     total_model_params: int | None = None
     tokenizer: PreTrainedTokenizer | None = None
     optimizer: optim.Optimizer | None = None
-    lr_scheduler: optim.lr_scheduler.LRScheduler | None = None
+    # lr_scheduler: optim.lr_scheduler.LRScheduler | None = None
     vocab_size: int | None = None
     eos_token_id: int | None = None
     dataloader: Iterator[torch.Tensor] | None = None
@@ -611,14 +613,30 @@ class BaseNeuron(BaseModel):
         # Clip the gradients
         await self.clip_gradients()
 
+        # request the learning rate from the orchestrator
+        learning_rate = await self.api_client.request_learning_rate()
+        self.optimizer.param_groups[0]["lr"] = learning_rate
         self.optimizer.step()
-        self.lr_scheduler.step()
+        # self.lr_scheduler.step()
         logger.info(f"{self.uid} learning rate: {self.optimizer.param_groups[0]['lr']}")
-        self.optimizer.zero_grad()
+
         self.completed_optim_steps += 1
 
         self.backwards_since_reduce = 0
         self.saved_forward_activations = {}
+
+        # Log the loss and other training state information to wandb.
+        # This is used for monitoring the loss during testing
+        if self.layer == settings.N_LAYERS - 1 and settings.USE_WANDB:
+            logger.info(f"Miner {self.uid} is logging to wandb for layer {self.layer}")
+            metrics = {"avg_loss": sum(self.losses_since_reduce) / len(self.losses_since_reduce)}
+            await self._log_wandb(metrics)
+
+        # Reset the losses since reduce
+        self.losses_since_reduce = []
+
+        # Zero the gradients
+        self.optimizer.zero_grad()
 
         # Log GPU memory after weight update
         if torch.cuda.is_available():
@@ -638,6 +656,64 @@ class BaseNeuron(BaseModel):
             except Exception as e:
                 logger.error(f"Error checking if {self.hotkey} is registered: {e}")
             await asyncio.sleep(100)
+
+    async def _log_wandb(self, metrics: dict):
+        """
+        Logs the metrics along with other training state information to wandb
+        """
+        # Log loss to wandb
+        if not self.wandb_initialized:
+            if settings.WANDB_TOKEN:
+                wandb.login(key=settings.WANDB_TOKEN)
+
+            wandb.init(
+                project=settings.WANDB_PROJECT,
+                entity=settings.WANDB_ENTITY,
+                name=f"{settings.RUN_NAME}",
+                config={
+                    # Model configuration
+                    "model_name": settings.MODEL_CFG["model_name"],
+                    "n_layers": settings.N_LAYERS,
+                    "model_splits": settings.MODEL_SPLITS,
+                    # Training hyperparameters
+                    "batch_size": settings.BATCH_SIZE,
+                    "sequence_length": settings.SEQUENCE_LENGTH,
+                    "total_train_steps": settings.TOTAL_TRAIN_STEPS,
+                    "weight_decay": settings.WEIGHT_DECAY,
+                    "pack_samples": settings.PACK_SAMPLES,
+                    "learning_rate": settings.LEARNING_RATE,
+                    "lr_warmup_start_factor": settings.LR_WARMUP_START_FACTOR,
+                    "lr_warmup_steps": settings.LR_WARMUP_STEPS,
+                    "lr_const_steps": settings.LR_CONST_STEPS,
+                    "lr_tail_steps_frac": settings.LR_TAIL_STEPS_FRAC,
+                    "lr_final_factor": settings.LR_FINAL_FACTOR,
+                    "lr_saw_cycle_length": settings.LR_SAW_CYCLE_LENGTH,
+                    # Dataset
+                    "dataset_name": settings.DATASET_NAME,
+                    # Model merging configuration
+                    "local_optimizer_steps": settings.LOCAL_OPTIMIZER_STEPS,
+                    "global_optimizer_steps": settings.GLOBAL_OPTIMIZER_STEPS,
+                    "miners_required_for_merging": settings.MINERS_REQUIRED_FOR_WEIGHT_UPLOADING,
+                    # Runtime configuration
+                    "device": str(settings.DEVICE),
+                    "mock_mode": settings.MOCK,
+                    "completed_optim_steps": self.completed_optim_steps,
+                },
+            )
+            self.wandb_initialized = True
+
+        # load global gradient norm
+        total_grad_norm = torch.sqrt(
+            sum(p.grad.detach().pow(2).sum() for p in self.model.parameters() if p.grad is not None)
+        )
+
+        wandb.log(
+            {
+                "avg_loss": metrics["avg_loss"],
+                "learning_rate": self.optimizer.param_groups[0]["lr"],
+                "grads/global_norm": float(total_grad_norm.item()),
+            }
+        )
 
     @property
     def block(self):
