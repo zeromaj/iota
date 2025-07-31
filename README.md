@@ -49,16 +49,14 @@ Visualizing the state of the network, the number of miners the number of layers,
 
 ## Installation
 1. First install uv (https://docs.astral.sh/uv/)
-2. Install packages using `uv sync`
-3. then activate the environment using `source .venv/bin/activate`
+2. Run `./setup.sh` and choose Miner or Validator
+3. Configure your `.env` file
 
 ## Addtional Miner Documentation
-Running the miner is as easy as `python launch_miner.py`. For more information, reference [the official miner docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-iota-mining-setup-guide)
-
-You can also run many miners on the same machine by running `python launch_miner.py --num_miners NUMBER_OF_MINERS`
+Running the miner is as easy as `./start_miner.sh`. For more information, reference [the official miner docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-iota-mining-setup-guide)
 
 ## Additional Validation Documentation
-Running the validator `python launch_validator.py`. For more information, reference [the official validator docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-validating)
+Running the validator `./start_validator.sh`. For more information, reference [the official validator docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-validating)
 
 ## Compute Requirements
 We recommend:
