@@ -1,8 +1,8 @@
 module.exports = {
     apps: [{
-        name: 'swarm-miner',
-        script: './launch_miner.py',
-        interpreter: '.venv/bin/python',
+        name: 'iota-miner',
+        script: './start_miner.sh',
+        interpreter: 'bash',
         cwd: './',
         watch: false,
         instances: 1,

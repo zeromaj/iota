@@ -1,8 +1,8 @@
 module.exports = {
     apps: [{
-        name: 'swarm-validator',
-        script: './launch_validator.py',
-        interpreter: '.venv/bin/python',
+        name: 'iota-validator',
+        script: './start_validators.sh',
+        interpreter: 'bash',
         cwd: './',
         watch: false,
         instances: 1,
