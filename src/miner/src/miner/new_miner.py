@@ -126,7 +126,9 @@ class Miner(BaseNeuron, HealthServerMixin):
                         self.partitions_submitted = False
 
                     elif self.state_manager.state == LayerPhase.WEIGHTS_UPLOADING:
-                        logger.info(f"🔄 Miner {self.hotkey[:8]} submitting weights")
+                        logger.info(
+                            f"\n\n\n\n\n\n\n\n 🔄 Miner {self.hotkey[:8]} in layer {self.state_manager.layer} submitting weights state!\n\n\n\n\n\n\n\n"
+                        )
                         if not self.weights_submitted:
                             await self.submit_weights()
                             self.weights_submitted = True
@@ -134,6 +136,9 @@ class Miner(BaseNeuron, HealthServerMixin):
                         await self.wait_for_state(state=LayerPhase.MERGING_PARTITIONS)
 
                     elif self.state_manager.state == LayerPhase.MERGING_PARTITIONS:
+                        logger.info(
+                            f"\n\n\n\n\n\n\n\n 🔄 Miner {self.hotkey[:8]} in layer {self.state_manager.layer} merging partitions state!\n\n\n\n\n\n\n\n"
+                        )
                         if not self.partitions_submitted:
                             logger.info(f"🔄 Miner {self.hotkey[:8]} getting weight partition info")
                             weight_path_per_layer, partitions = await self.get_weight_partition_info()
@@ -553,6 +558,11 @@ class Miner(BaseNeuron, HealthServerMixin):
             SubmittedWeightsError: If the weights are not submitted successfully
             e: If there is an error submitting the weights
         """
+
+        learning_rate = await MinerAPIClient.get_learning_rate(hotkey=self.wallet.hotkey)
+        learning_rate = await self.parse_response(learning_rate)
+        await self.model_manager.local_all_reduce(learning_rate=learning_rate)
+
         flattened_optimizer_state, _, _ = flatten_optimizer_state(
             optimizer=self.model_manager.optimizer, device=miner_settings.DEVICE
         )

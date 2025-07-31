@@ -226,79 +226,40 @@ class ModelManager:
         logger.info(f"Loading tokenizer from {common_settings.TOKENIZER_NAME}")
         self.tokenizer = AutoTokenizer.from_pretrained(common_settings.TOKENIZER_NAME, token=common_settings.HF_TOKEN)
 
-    async def _forward(self, layer: int, input_activations: torch.Tensor) -> tuple[torch.Tensor, dict]:
-        if layer > 0:
-            input_activations.requires_grad_(True)
-        output_activations, state = self.model(input_activations)
-        return output_activations, state
+    async def local_all_reduce(self, learning_rate: float):
+        """local all reduce is for local testing purposes. It's not used in the production code.
 
-    async def _backward(
-        self,
-        layer: int,
-        output_activations: torch.Tensor,
-        activation_grads: torch.Tensor,
-        state: dict,
-    ):
-        # If this is the last layer, then output_activations is the loss
-        if layer == common_settings.N_LAYERS - 1:
-            try:
-                check_for_nans_and_infs(
-                    output_activations, f"output activations for miner {self.logger_attributes['hotkey'][:8]}"
-                )
-                output_activations.backward(retain_graph=True)
-            except RuntimeError as e:
-                logger.error(f"Error during backward step: {e}")
-                raise
-        else:
-            try:
-                check_for_nans_and_infs(
-                    output_activations, f"output activations for miner {self.logger_attributes['hotkey'][:8]}"
-                )
-                check_for_nans_and_infs(
-                    activation_grads, f"activation grads for miner {self.logger_attributes['hotkey'][:8]}"
-                )
-                self.model.backward(output_activations, activation_grads, state)
-            except RuntimeError as e:
-                logger.error(f"Error during backward step: {e}")
-                raise
+        Args:
+            layer (int): the layer to all reduce
+        """
+        logger.info(f"{self.logger_attributes['hotkey'][:8]} is doing local all reduce")
 
-    async def local_all_reduce(self, layer: int, hotkey: str):
-        pass
-        # """local all reduce is for local testing purposes. It's not used in the production code.
+        # Clip the gradients
+        await self.clip_gradients()
 
-        # Args:
-        #     layer (int): the layer to all reduce
-        # """
-        # logger.info(f"{hotkey[:8]} updating weights after {self.backwards_since_reduce} steps")
-        # logger.warning(f"{hotkey[:8]} is stepping")
-
-        # # Clip the gradients
-        # await self.clip_gradients()
-
-        # # request the learning rate from the orchestrator
-        # learning_rate = await MinerAPIClient.request_learning_rate()
-        # self.optimizer.param_groups[0]["lr"] = learning_rate
-        # self.optimizer.step()
-        # # self.lr_scheduler.step()
-        # logger.info(f"{hotkey[:8]} learning rate: {self.optimizer.param_groups[0]['lr']}")
+        # request the learning rate from the orchestrator
+        self.optimizer.param_groups[0]["lr"] = learning_rate
+        self.optimizer.step()
+        # self.lr_scheduler.step()
+        logger.info(f"{self.logger_attributes['hotkey'][:8]} learning rate: {self.optimizer.param_groups[0]['lr']}")
 
         # self.completed_optim_steps += 1
 
         # self.backwards_since_reduce = 0
         # self.saved_forward_activations = {}
 
-        # # Log the loss and other training state information to wandb.
-        # # This is used for monitoring the loss during testing
+        # Log the loss and other training state information to wandb.
+        # This is used for monitoring the loss during testing
         # if layer == common_settings.N_LAYERS - 1 and common_settings.USE_WANDB:
         #     logger.info(f"Miner {hotkey[:8]} is logging to wandb for layer {layer}")
         #     metrics = {"avg_loss": sum(self.losses_since_reduce) / len(self.losses_since_reduce)}
         #     await self._log_wandb(metrics)
 
-        # # Reset the losses since reduce
+        # Reset the losses since reduce
         # self.losses_since_reduce = []
 
-        # # Zero the gradients
-        # self.optimizer.zero_grad()
+        # Zero the gradients
+        self.optimizer.zero_grad()
 
         # # Log GPU memory after weight update
         # if torch.cuda.is_available():

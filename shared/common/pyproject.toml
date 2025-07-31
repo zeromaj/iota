@@ -7,16 +7,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "aiohttp>=3.9.0",
-    "aiobotocore>=2.23.0",
-    "boto3>=1.37.33",
+    "dotenv>=0.9.9",
     "fastapi>=0.110.1",
-    "httpx>=0.28.1",
     "loguru>=0.7.3",
-    "numpy>=1.24.0",
     "pydantic>=2.11.3",
     "requests>=2.31.0",
     "substrate-interface>=1.7.11",
-    "pyinstrument>=5.0.3"
+    "pytest-asyncio>=1.0.0",
 ]
 
 [build-system]

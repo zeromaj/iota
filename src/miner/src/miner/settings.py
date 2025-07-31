@@ -3,7 +3,8 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-if not load_dotenv(dotenv_path=".env"):
+DOTENV_PATH = os.getenv("DOTENV_PATH", ".env")
+if not load_dotenv(dotenv_path=DOTENV_PATH):
     logger.warning("No .env file found for miner settings")
 
 # Wallet

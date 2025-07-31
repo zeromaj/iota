@@ -1,8 +1,9 @@
-import json
-import aiohttp
 import asyncio
-from loguru import logger
+import json
 from typing import Any
+
+import aiohttp
+from loguru import logger
 
 
 async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries: int = 3) -> list[dict]:

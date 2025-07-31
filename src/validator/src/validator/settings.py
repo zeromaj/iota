@@ -10,10 +10,6 @@ if not load_dotenv(dotenv_path=DOTENV_PATH):
 
 DEVICE = os.getenv("DEVICE", "cpu")
 
-# Gradient Validators
-VALIDATOR_HOSTS = (
-    os.getenv("VALIDATOR_HOSTS", "localhost").strip().split(",") if os.getenv("VALIDATOR_HOSTS") else ["localhost"]
-)
 # WEIGHT_SUBMIT_INTERVAL: int = 3600  # submit weight every 1 hour
 WEIGHT_SUBMIT_INTERVAL: int = 10 if (MOCK or not BITTENSOR) else 60 * 21  # submit weight every 21 minutes
 FETCH_TASKS_INTERVAL: int = 5 if (MOCK or not BITTENSOR) else 120  # fetch tasks every 2 minutes
@@ -22,22 +18,7 @@ ORCHESTRATOR_HEALTH_CHECK_INTERVAL: int = 10  # check orchestrator health every 
 # Validation Thresholds
 COSINE_SIMILARITY_THRESHOLD = 0.9
 ACTIVATION_MAGNITUDE_THRESHOLD = 0.8
-WEIGHT_MAGNITUDE_THRESHOLD = 0.7
 OPTIMIZER_SIMILARITY_THRESHOLD = 0.8
-
-# Handle validator ports more gracefully
-validator_ports_env = os.getenv("VALIDATOR_PORTS", "")
-if validator_ports_env and validator_ports_env.strip():
-    VALIDATOR_PORTS = [int(port.strip()) for port in validator_ports_env.split(",") if port.strip()]
-else:
-    VALIDATOR_PORTS = [8081]  # Default starting port
-
-VALIDATOR_SCHEME = os.getenv("VALIDATOR_SCHEME", "http")
-TCP_PORT_ENV_NAME = f"RUNPOD_TCP_PORT_{str(VALIDATOR_PORTS[0])}"
-VALIDATOR_PUBLIC_PORT = os.getenv(TCP_PORT_ENV_NAME, str(VALIDATOR_PORTS[0]))
-VALIDATOR_PUBLIC_IP = os.getenv("RUNPOD_PUBLIC_IP", VALIDATOR_HOSTS[0])
-VALIDATOR_EXTERNAL_PORT = os.getenv("VALIDATOR_EXTERNAL_PORT", VALIDATOR_PUBLIC_PORT)
-VALIDATOR_INTERNAL_PORT = os.getenv("VALIDATOR_INTERNAL_PORT", VALIDATOR_PORTS[0])
 
 # Health settings
 LAUNCH_HEALTH = os.getenv("LAUNCH_HEALTH") == "True"

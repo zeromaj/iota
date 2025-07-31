@@ -47,24 +47,28 @@ class CommonAPIClient:
                     ) as response:
                         # Extract request ID from response headers
                         request_id = response.headers.get(HEADER_REQUEST_ID, "unknown")
+                        response_text = None
 
                         # Add request ID to logger context for all subsequent logs
                         with logger.contextualize(request_id=request_id):
                             if response.status == 429:
+                                response_text = await response.text() if not response_text else response_text
                                 logger.warning(
-                                    f"Rate limited on request to endpoint {path}: {response.status} - {await response.text()}"
+                                    f"Rate limited on request to endpoint {path}: {response.status} - {response_text}"
                                 )
                             if response.status == 404:
+                                response_text = await response.text() if not response_text else response_text
                                 logger.error(
-                                    f"Bad request on request to endpoint {path}: {response.status} - {await response.text()}"
+                                    f"Bad request on request to endpoint {path}: {response.status} - {response_text}"
                                 )
                                 raise APIException(
-                                    f"Bad request on request to endpoint {path}: {response.status} - {await response.text()}"
+                                    f"Bad request on request to endpoint {path}: {response.status} - {response_text}"
                                 )
                             if response.status != 200:
                                 # Handle non-JSON error responses
+                                response_text = await response.text() if not response_text else response_text
                                 logger.error(
-                                    f"Error making orchestrator request to endpoint {path}: {response.status} - {await response.text()}"
+                                    f"Error making orchestrator request to endpoint {path}: {response.status} - {response_text}"
                                 )
                                 await asyncio.sleep(2)
                             else:
@@ -89,7 +93,7 @@ class CommonAPIClient:
                     )
             raise error
         else:
-            error_msg = f"Got bad/no response from orchestrator: {response.status}, {response.content}"
+            error_msg = f"Got bad/no response from orchestrator: {response.status}, {response_text}"
             if request_id:
                 with logger.contextualize(request_id=request_id):
                     logger.error(error_msg)

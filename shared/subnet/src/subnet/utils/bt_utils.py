@@ -39,7 +39,7 @@ def get_subtensor() -> bt.subtensor:
 
     elif common_settings.BITTENSOR:
         logger.info("🔄 Using subtensor")
-        return bt.subtensor()
+        return bt.subtensor(network=common_settings.NETWORK)
     else:
         raise Exception("No subtensor found")
 

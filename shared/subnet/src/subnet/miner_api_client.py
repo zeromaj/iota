@@ -229,6 +229,16 @@ class MinerAPIClient(CommonAPIClient):
             raise
 
     @classmethod
+    async def get_learning_rate(cls, hotkey: Keypair) -> float | dict:
+        """Get the current learning rate."""
+        try:
+            response: float = await cls.orchestrator_request(method="GET", path="/miner/learning_rate", hotkey=hotkey)
+            return response
+        except Exception as e:
+            logger.error(f"Error getting learning rate: {e}")
+            raise
+
+    @classmethod
     async def submit_merged_partitions(cls, hotkey: Keypair, merged_partitions: list[MinerPartition]) -> dict:
         """Submit merged partitions to the orchestrator."""
         try:

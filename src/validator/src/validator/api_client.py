@@ -1,10 +1,10 @@
-import aiohttp
 import asyncio
-from loguru import logger
-from typing import Dict, Any, Literal
-from aiohttp import ClientError, ContentTypeError
+from typing import Any, Dict, Literal
 
+import aiohttp
+from aiohttp import ClientError, ContentTypeError
 from common import settings as common_settings
+from loguru import logger
 
 
 class ValidatorClient:
