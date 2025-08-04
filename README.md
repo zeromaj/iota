@@ -51,22 +51,22 @@ Visualizing the state of the network, the number of miners the number of layers,
 
 
 
-## Installation
+## Installation ⬇️
 1. First install uv (https://docs.astral.sh/uv/)
 2. Run `bash setup.sh` and choose Miner or Validator
 3. Configure your `.env` file
 
-## Addtional Miner Documentation
+## Addtional Miner Documentation 📚
 Running the miner is as easy as `./start_miner.sh`. For more information, reference [the official miner docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-iota-mining-setup-guide)
 
 Use PM2 to run the miner in the background: `pm2 start pm2/miner.config.js`
 
-## Additional Validation Documentation
+## Additional Validation Documentation 📚
 Running the validator `./start_validator.sh`. For more information, reference [the official validator docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-validating)
 
 Use PM2 to run the validator in the background: `pm2 start pm2/validator.config.js`
 
-## Compute Requirements
+## Compute Requirements 🧑🏻‍💻
 The runs are currently in bfloat16, resulting in a total footprint of ~2GB for a 1B parameter model. As such, we recommend:
 1. Cuda GPU with >= 8GB VRAM (RTX 4080, for example)
 2. Ubuntu 22.04 (Jammy)
