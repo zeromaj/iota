@@ -644,51 +644,56 @@ class Miner(BaseNeuron, HealthServerMixin):
 
         The method runs in a loop and retries on failures with a fixed delay.
         """
-        while True:
-            logger.info(f"🚀 Starting miner {self.hotkey[:8]} 🚀")
+
+        logger.info(f"🚀 Starting miner {self.hotkey[:8]} 🚀")
+        try:
+            # Start the healthcheck server
+            if miner_settings.LAUNCH_HEALTH:
+                await self._start_health_server()
+                logger.info(f"🏥 Health server started for miner {self.hotkey[:8]}")
+            else:
+                logger.warning(
+                    "⚠️ Miner healthcheck API not configured in settings (MINER_HEALTH_PORT missing). Skipping."
+                )
+
+            # Reset the entire miner state, which also downloads the weights and optimizer state.
+            await self.reset_entire_miner_state()
+            await self.run()
+
+        except KeyboardInterrupt:
+            logger.info(f"Gracefully shutting down miner {self.hotkey[:8]}")
+
+        except SpecVersionException as e:
+            logger.error(f"Spec version mismatch. Please pull the latest code and restart the miner: {e}")
+            raise
+
+        except Exception as e:
+            logger.exception(f"❌ Critical error in run_miner for {self.hotkey[:8]}: {e}")
+            await asyncio.sleep(5)
+
+        finally:
+            logger.info(f"Cleaning up miner {self.hotkey[:8]} on shutdown...")
             try:
-                # Start the healthcheck server
+                if hasattr(self, "model_manager"):
+                    self.model_manager._clean_gpu_memory()
+
                 if miner_settings.LAUNCH_HEALTH:
-                    await self._start_health_server()
-                    logger.info(f"🏥 Health server started for miner {self.hotkey[:8]}")
-                else:
-                    logger.warning(
-                        "⚠️ Miner healthcheck API not configured in settings (MINER_HEALTH_PORT missing). Skipping."
-                    )
-
-                # Reset the entire miner state, which also downloads the weights and optimizer state.
-                await self.reset_entire_miner_state()
-                await self.run()
-
-            except KeyboardInterrupt:
-                logger.info(f"Gracefully shutting down miner {self.hotkey[:8]}")
-                break
-            except SpecVersionException as e:
-                logger.error(f"Spec version mismatch. Please pull the latest code and restart the miner: {e}")
-                raise
+                    try:
+                        await self._stop_health_server()
+                        logger.info(f"🏥 Health server stopped for miner {self.hotkey[:8]}")
+                    except Exception as e:
+                        logger.error(f"Failed to stop health server for miner {self.hotkey[:8]}: {e}")
 
             except Exception as e:
-                logger.exception(f"❌ Critical error in run_miner for {self.hotkey[:8]}: {e}")
-                await asyncio.sleep(5)
-
-            finally:
-                logger.info(f"Cleaning up miner {self.hotkey[:8]} on shutdown...")
-                try:
-                    if hasattr(self, "model_manager"):
-                        self.model_manager._clean_gpu_memory()
-
-                    if miner_settings.LAUNCH_HEALTH:
-                        try:
-                            await self._stop_health_server()
-                            logger.info(f"🏥 Health server stopped for miner {self.hotkey[:8]}")
-                        except Exception as e:
-                            logger.error(f"Failed to stop health server for miner {self.hotkey[:8]}: {e}")
-
-                except Exception as e:
-                    logger.error(f"Failed to shutdown miner {self.hotkey[:8]}: {e}")
+                logger.error(f"Failed to shutdown miner {self.hotkey[:8]}: {e}")
 
         # Final cleanup when exiting the loop (only reached on KeyboardInterrupt)
         logger.info(f"🛑 Miner {self.hotkey[:8]} shutdown complete")
+
+        # Miners can sometimes not clean themselves up properly. Therefore, lets force kill the process.
+        import sys
+
+        sys.exit(0)
 
     async def reset_entire_miner_state(self):
         """
