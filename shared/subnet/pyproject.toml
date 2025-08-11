@@ -1,0 +1,22 @@
+[project]
+name = "subnet"
+version = "0.1.0"
+description = "Subnet shared dependencies"
+authors = [{ name = "Macrocosmos.ai" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "common",
+    "bittensor==9.3.0",
+    "bittensor-cli>=9.4.0",
+    "tenacity>=9.1.2",
+    "torch>=2.6.0",
+    "transformers==4.38.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+common = { workspace = true }
