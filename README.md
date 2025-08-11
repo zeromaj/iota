@@ -57,7 +57,7 @@ Visualizing the state of the network, the number of miners the number of layers,
 3. Configure your `.env` file
 
 ## Addtional Miner Documentation 📚
-Running the miner is as easy as `./start_miner.sh`. For more information, reference [the official miner docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-iota-mining-setup-guide)
+Running the miner is as easy as `bash ./start_miner.sh`. For more information, reference [the official miner docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-iota-mining-setup-guide)
 
 Use PM2 to run the miner in the background: `pm2 start pm2/miner.config.js`
 
