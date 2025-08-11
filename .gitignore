@@ -25,7 +25,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-.env
+.env*
 weights_log.csv
 *weight_cache*
 # UV package manager
