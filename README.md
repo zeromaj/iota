@@ -9,7 +9,7 @@
 <div align="center">
 
 <a href="https://iota.macrocosmos.ai">
-  <img src="./assets/iota-page.png" alt="iota" width="600"/>
+  <img src="./docs/assets/iota-page.png" alt="iota" width="600"/>
 </a>
 
 </div>
@@ -26,7 +26,7 @@ For a more comprehensive overview, please refer to our technical paper [here](ht
 
 <div align="center">
     <a href="https://www.macrocosmos.ai/research/iota_primer.pdf">
-    <img src="./assets/iota-paper-page.png" alt="iota" width="600"/>
+    <img src="./docs/assets/iota-paper-page.png" alt="iota" width="600"/>
     </a>
 </div>
 
@@ -46,7 +46,7 @@ Visualizing the state of the network, the number of miners, layers, and general 
 
 <div align="center">
     <a href="https://iota.macrocosmos.ai/dashboard/mainnet">
-    <img src="./assets/iota-dashboard.png" alt="iota" width="600"/>
+    <img src="./docs/assets/iota-dashboard.png" alt="iota" width="600"/>
     </a>
 </div>
 
