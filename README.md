@@ -68,5 +68,5 @@ Use PM2 to run the validator in the background: `pm2 start pm2/validator.config.
 
 ## Compute Requirements 🧑🏻‍💻
 The runs are currently in bfloat16, resulting in a total footprint of ~2GB for a 1B parameter model. As such, we recommend:
-1. Cuda GPU with >= 8GB VRAM (RTX 4080, for example)
+1. Cuda GPU with >= 16GB VRAM (RTX 4090, for example)
 2. Ubuntu 22.04 (Jammy)
