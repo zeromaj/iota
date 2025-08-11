@@ -1,0 +1,21 @@
+[project]
+name = "common"
+version = "0.1.0"
+description = "Common shared dependencies"
+authors = [{ name = "Macrocosmos.ai" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "dotenv>=0.9.9",
+    "fastapi>=0.110.1",
+    "loguru>=0.7.3",
+    "pydantic>=2.11.3",
+    "requests>=2.31.0",
+    "substrate-interface>=1.7.11",
+    "pytest-asyncio>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
