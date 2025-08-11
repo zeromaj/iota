@@ -1,8 +1,8 @@
 import os
-from loguru import logger
-from dotenv import load_dotenv
 
-from common.configs import LLAMA32_CONFIG_100M, LLAMA32_CONFIG_1B
+from common.configs import LLAMA32_CONFIG_1B, LLAMA32_CONFIG_100M
+from dotenv import load_dotenv
+from loguru import logger
 
 COMMON_DOTENV_PATH = os.getenv("COMMON_DOTENV_PATH", ".env")
 if not load_dotenv(dotenv_path=COMMON_DOTENV_PATH):
@@ -20,8 +20,8 @@ TEST_MODE = os.getenv("TEST_MODE") == "True"
 __SPEC_VERSION__ = 4065
 BITTENSOR = os.getenv("BITTENSOR") == "True"
 MAX_NUM_PARTS = int(os.getenv("MAX_NUM_PARTS", 10000))
-NETUID = int(os.getenv("NETUID", "141"))
-NETWORK = os.getenv("NETWORK", "test")
+NETUID = int(os.getenv("NETUID", "9"))
+NETWORK = os.getenv("NETWORK", "finney")
 OWNER_UID = 209
 
 # Orchestrator settings (common)
