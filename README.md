@@ -1,105 +1,76 @@
+<div align="center">
+
 # IOTA
 
-**I**ncentivized **O**rchestrated **T**raining **A**rchitecture
+</div>
 
-# Development
+**I**ncentivized **O**rchestrated **T**raining **A**rchitecture (IOTA) is a framework for pretraining large language models across a network of heterogeneous, unreliable, permissionless and token incentivized machines. IOTA employs a data- and pipeline-parallel architecture to accelerate training and reduce hardware requirements for participants.
 
-## Prerequisites
+<div align="center">
 
-1. **Environment Setup**: First, create your environment file:
+<a href="https://iota.macrocosmos.ai">
+  <img src="./assets/iota-page.png" alt="iota" width="600"/>
+</a>
 
-```sh
-cp dotenv.example .env
-# Edit .env with your actual values:
-# HF_TOKEN="your_hugging_face_token"
-# AWS_ACCESS_KEY_ID="your_aws_access_key"
-# AWS_SECRET_ACCESS_KEY="your_aws_secret_key"
-```
+</div>
 
-2. **Dependencies**: Install UV package manager and sync dependencies:
+## **Overview**
 
-```sh
-# Run the dev environment setup script
-./devsetup.sh
-```
+- The orchestrator distributes model layers across heterogeneous miners and streams activations between them.
+- All network communication is mediated via the orchestrator, and a shared S3 bucket is used to store activations and layer weights.
+- Miners compete to process as many activations as possible in the training stage.
+- Miners periodically upload their local weights and merge their activations using a variant of Butterfly All-Reduce.
+- Validators spot-check miners to ensure that work was performed as required.
 
-## Development Workflow
+For a more comprehensive overview, please refer to our technical paper [here](https://www.macrocosmos.ai/research/iota_primer.pdf). You can also find the report on [ArXiv](https://arxiv.org/abs/2507.17766)
 
-### Option 1: Using Task Runner (recommended)
+<div align="center">
+    <a href="https://www.macrocosmos.ai/research/iota_primer.pdf">
+    <img src="./assets/iota-paper-page.png" alt="iota" width="600"/>
+    </a>
+</div>
 
-The project includes a `Taskfile.yml` for common operations:
+## Current Run Information
 
-```sh
-# Install Task runner if needed
-# if you haven't run the devsetup.sh you can also use go to install:
-# go install github.com/go-task/task/v3/cmd/task@latest
+- **1.5B parameter** Llama-inspired architecture with uninterrupted residual flow (see paper for details)
+- **3 layers**, breaking the model into 3 distinct training sections (1 head, 1 tail, 1 body)
 
-# Build and run Docker backend services
-task up
+## Future Run Information
 
-# Start 3 miners
-task start-miners
+1. Scaling the system to 15B, 50B, and 100B models
+2. More advanced compression techniques to speed up training
 
-# To get a list of all commands:
-task
-```
+## Comprehensive Dashboard
 
+Visualizing the state of the network, the number of miners, layers, and general metrics is paramount to understanding the training process. We provide a comprehensive dashboard [here](https://iota.macrocosmos.ai/dashboard/mainnet).
 
-### Option 2: Use Docker Compose
+<div align="center">
+    <a href="https://iota.macrocosmos.ai/dashboard/mainnet">
+    <img src="./assets/iota-dashboard.png" alt="iota" width="600"/>
+    </a>
+</div>
 
-Start the full stack:
+## Installation
 
-```sh
-# Start all services
-docker compose -f compose.dev.yaml up
+1. First install uv (<https://docs.astral.sh/uv/>)
+2. Run `bash setup.sh` and choose Miner or Validator
+3. Configure your `.env` file
 
-# Or run in background
-docker compose -f compose.dev.yaml up -d
+## Additional Miner Documentation
 
-# Build a compose.miners.yaml file
-task generate-miners MINERS=0,1,2
+Running the miner is as easy as `bash ./start_miner.sh`. For more information, reference [the official miner docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-iota-mining-setup-guide).
 
-# Start the miners
-docker compose -f compose.miners.yaml up
-```
+Use PM2 to run the miner in the background: `pm2 start pm2/miner.config.js`
 
-This gives you:
-- **PostgreSQL**: localhost:5432 (user: postgres, password: postgres, db: iota_orch_state)
-- **Orchestrator**: localhost:8000 (API endpoints)
-- **Scheduler**: scheduler stand-alone service
+## Additional Validation Documentation
 
-Useful commands:
+Running the validator `./start_validator.sh`. For more information, reference [the official validator docs](https://docs.macrocosmos.ai/subnets/subnet-9-pre-training/subnet-9-validating)
 
-```sh
-# View logs
-docker compose -f compose.dev.yaml logs -f
+Use PM2 to run the validator in the background: `pm2 start pm2/validator.config.js`
 
-# Stop and remove services
-docker compose -f compose.dev.yaml down
+## Compute Requirements
 
-# Rebuild specific service
-docker compose -f compose.dev.yaml build orchestrator
-docker compose -f compose.dev.yaml up orchestrator --force-recreate
-```
+The runs are currently in bfloat16, resulting in a total footprint of ~2GB for a 1B parameter model. As such, we recommend:
 
-### Option 3: Hybrid Development (Database in Docker, Services Local)
-
-For faster development with hot reloading:
-Start only PostgreSQL:
-
-```sh
-docker compose up postgres -d
-```
-
-Run services locally:
-
-```sh
-# Terminal 1 - Orchestrator
-uv run src/orchestrator/main.py
-
-# Terminal 2 - Scheduler
-uv run src/scheduler/main.py
-
-# Terminal 3 - Miners
-uv run src/miner/scripts/launch_multiple_miners.py --num-miners 3
-```
+1. Cuda GPU with >= 16GB VRAM (RTX 4090, for example).
+2. Ubuntu 22.04 (Jammy)
