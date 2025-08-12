@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 from typing import Literal, Optional
 
+from common.models.miner_models import MetadataInfo
 import torch
 from aiohttp import web
 from bittensor import Wallet
@@ -44,7 +45,13 @@ from subnet.utils.vector_utils import check_for_nans_and_infs, flatten_optimizer
 
 from miner import settings as miner_settings
 from miner.state_manager import CacheEntry, StateManager
-from miner.utils.utils import create_metadata, download_chunk_of_model, upload_file
+from miner.utils.utils import (
+    create_metadata,
+    download_chunk_of_model,
+    download_metadata,
+    extract_filename_from_url,
+    upload_file,
+)
 
 
 class HealthServerMixin:
@@ -749,6 +756,208 @@ class Miner(BaseNeuron, HealthServerMixin):
 
         return weight_path_per_layer, [MinerPartition(**p) for p in partitions]
 
+    async def get_metadata_info(
+        self, packet: SubmittedWeightsPresigned, partitions: list[MinerPartition]
+    ) -> dict[int, dict[str, MetadataInfo]]:
+        """Get metadata info for both weights and optimizer state."""
+        # Download both weight and optimizer state metadata
+        weight_metadata_path = packet.weight_metadata_path_presigned
+        weight_metadata: dict = await download_metadata(metadata_path=weight_metadata_path)
+
+        optimizer_state_metadata_path = packet.optimizer_state_metadata_path_presigned
+        optimizer_state_metadata: dict = await download_metadata(metadata_path=optimizer_state_metadata_path)
+
+        metadata_infos: dict[int, dict] = {}
+        for partition in partitions:
+            chunk_number = partition.chunk_number
+
+            # Create separate metadata info for weights and optimizer state
+            weight_metadata_info = MetadataInfo(
+                **weight_metadata["sections"][str(chunk_number)],
+                chunk_number=chunk_number,
+                weighting_factor=packet.weighting_factor,
+                weight_path=packet.weights_path_presigned,
+                weight_metadata_path=packet.weight_metadata_path_presigned,
+                optimizer_state_path=packet.optimizer_state_path_presigned,
+                optimizer_state_metadata_path=packet.optimizer_state_metadata_path_presigned,
+                chunk_dtype=weight_metadata["tensor"]["dtype"].split(".")[-1],
+            )
+
+            optimizer_state_metadata_info = MetadataInfo(
+                **optimizer_state_metadata["sections"][str(chunk_number)],
+                chunk_number=chunk_number,
+                weighting_factor=packet.weighting_factor,
+                weight_path=packet.weights_path_presigned,
+                weight_metadata_path=packet.weight_metadata_path_presigned,
+                optimizer_state_path=packet.optimizer_state_path_presigned,
+                optimizer_state_metadata_path=packet.optimizer_state_metadata_path_presigned,
+                chunk_dtype=optimizer_state_metadata["tensor"]["dtype"].split(".")[-1],
+            )
+
+            metadata_infos[chunk_number] = {
+                "weights": weight_metadata_info,
+                "optimizer_state": optimizer_state_metadata_info,
+            }
+
+        return metadata_infos
+
+    async def filter_bad_metadata(
+        self,
+        partitions: list[MinerPartition],
+        weight_path_per_layer: list[SubmittedWeightsPresigned],
+    ) -> dict[str, dict[int, dict[str, MetadataInfo]]]:
+        """Filter out packets with bad metadata and return valid metadata info objects.
+
+        Returns:
+            dict[str, dict[int, dict[str, MetadataInfo]]]: Valid metadata info objects keyed by weight path
+        """
+        if len(weight_path_per_layer) <= 2:
+            logger.debug(
+                f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | only {len(weight_path_per_layer)} packets, returning metadata info without filtering"
+            )
+            partition_infos = await asyncio.gather(
+                *[self.get_metadata_info(packet=packet, partitions=partitions) for packet in weight_path_per_layer]
+            )
+            partition_infos = {
+                packet.weights_path_presigned: partition_info
+                for packet, partition_info in zip(weight_path_per_layer, partition_infos)
+            }
+            return partition_infos
+
+        def metadata_matches(
+            meta1: dict[int, dict[str, MetadataInfo]], meta2: dict[int, dict[str, MetadataInfo]]
+        ) -> bool:
+            """Check if two metadata dictionaries match."""
+            if set(meta1.keys()) != set(meta2.keys()):
+                return False
+
+            for chunk_number in meta1.keys():
+                # Check both weights and optimizer_state metadata
+                for data_type in ["weights", "optimizer_state"]:
+                    m1, m2 = meta1[chunk_number][data_type], meta2[chunk_number][data_type]
+                    if (
+                        m1.start_idx is None
+                        or m1.end_idx is None
+                        or m1.start_byte is None
+                        or m1.end_byte is None
+                        or m1.weighting_factor is None
+                        or m2.start_idx is None
+                        or m2.end_idx is None
+                        or m2.start_byte is None
+                        or m2.end_byte is None
+                        or m2.weighting_factor is None
+                        or m1.start_idx != m2.start_idx
+                        or m1.end_idx != m2.end_idx
+                        or m1.start_byte != m2.start_byte
+                        or m1.end_byte != m2.end_byte
+                    ):
+                        logger.warning(
+                            f"Metadata mismatch for miner {self.hotkey[:8]} | layer {self.state_manager.layer} | chunk {chunk_number} | {data_type}: {m1} != {m2}"
+                        )
+                        return False
+            return True
+
+        # Collect valid metadata from all packets
+        valid_metadata: dict[str, dict[int, dict[str, MetadataInfo]]] = {}
+        for packet in weight_path_per_layer:
+            try:
+                packet_metadata: dict[int, dict[str, MetadataInfo]] = await self.get_metadata_info(
+                    packet=packet, partitions=partitions
+                )
+                valid_metadata[packet.weights_path_presigned] = packet_metadata
+            except Exception as e:
+                logger.warning(f"Failed to get metadata for {packet.weights_path_presigned}: {e}")
+
+        if not valid_metadata:
+            logger.warning("No valid metadata found")
+            return {}
+
+        # Find most common metadata pattern
+        agreement_counts: dict[str, int] = {}
+        for path1, meta1 in valid_metadata.items():
+            agreement_counts[path1] = sum(
+                1 for path2, meta2 in valid_metadata.items() if path1 != path2 and metadata_matches(meta1, meta2)
+            )
+
+        # Keep only metadata that matches the most common pattern
+        best_path = max(agreement_counts, key=agreement_counts.get)
+        best_metadata = valid_metadata[best_path]
+
+        filtered_metadata = {
+            path: meta for path, meta in valid_metadata.items() if metadata_matches(best_metadata, meta)
+        }
+
+        filtered_count = len(valid_metadata) - len(filtered_metadata)
+        if filtered_count > 0:
+            logger.warning(f"Filtered out {filtered_count} packets due to metadata disagreements")
+
+        return filtered_metadata
+
+    async def download_partition(
+        self, metadata: dict[int, dict[str, MetadataInfo]], partition: MinerPartition
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Download the weights and optimizer state for a given partition.
+
+        Args:
+            metadata (dict[int, dict[str, MetadataInfo]]): The metadata for the partition
+            partition (MinerPartition): The partition to download
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: The weights and optimizer state for the partition
+        """
+
+        # This is the 1d sequence of bytes that we are going to merge with the other miners
+        logger.debug(f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | downloading weights")
+
+        weights_metadata = metadata[partition.chunk_number]["weights"]
+        optimizer_state_metadata = metadata[partition.chunk_number]["optimizer_state"]
+
+        # Cursor *really* wanted me to do this...
+        assert (
+            weights_metadata.weight_path is not None
+        ), f"Weights metadata path is None for partition {partition.chunk_number}"
+        assert (
+            optimizer_state_metadata.optimizer_state_path is not None
+        ), f"Optimizer state metadata path is None for partition {partition.chunk_number}"
+
+        weights: torch.Tensor = await download_chunk_of_model(
+            miner_hotkey=self.hotkey,
+            layer=self.state_manager.layer,
+            weights_path=weights_metadata.weight_path,
+            metadata_info=weights_metadata,
+            chunk_id=partition.chunk_number,
+            data_type="weights",
+            data_path=weights_metadata.weight_path,
+        )
+        logger.debug(
+            f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | downloaded weights from {weights_metadata.weight_path}"
+        )
+
+        logger.debug(f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | downloading optimizer state")
+        optimizer_state: torch.Tensor = await download_chunk_of_model(
+            miner_hotkey=self.hotkey,
+            layer=self.state_manager.layer,
+            weights_path=optimizer_state_metadata.optimizer_state_path,
+            metadata_info=optimizer_state_metadata,
+            chunk_id=partition.chunk_number,
+            data_type="optimizer_state",
+            data_path=optimizer_state_metadata.optimizer_state_path,
+        )
+
+        logger.debug(
+            f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | downloaded optimizer state from {optimizer_state_metadata.optimizer_state_path}"
+        )
+
+        # Setting variables for the chunk
+        logger.debug(
+            f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | setting variables for chunk {partition.chunk_number}"
+        )
+
+        logger.debug(
+            f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | weight_start_idx: {metadata[partition.chunk_number]['weights'].start_idx}, weight_end_idx: {metadata[partition.chunk_number]['weights'].end_idx}, optimizer_state_start_idx: {metadata[partition.chunk_number]['optimizer_state'].start_idx}, optimizer_state_end_idx: {metadata[partition.chunk_number]['optimizer_state'].end_idx}"
+        )
+        return weights, optimizer_state
+
     async def merge_partitions(
         self, weight_path_per_layer: list[SubmittedWeightsPresigned], partitions: list[MinerPartition]
     ) -> list[MinerPartition]:
@@ -761,13 +970,12 @@ class Miner(BaseNeuron, HealthServerMixin):
         Returns:
             list[Partition]: The merged partitions
         """
-        # Filter out packets that don't match the current miner's partition scheme.
-        # This is a defensive measure against potential orchestrator bugs sending inconsistent data.
-        # This also improves the speed of the merge by only downloading the partitions that are relevant to the current miner.
         final_partitions: list[MinerPartition] = []
 
-        # Loop over the partition indices one at a time and download the chunks from all miners.
-        # Then perform merge, upload and move on to the next partition index
+        filtered_metadata = await self.filter_bad_metadata(
+            partitions=partitions, weight_path_per_layer=weight_path_per_layer
+        )
+
         for partition in partitions:
             logger.debug(
                 f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | merging partition {partition.chunk_number}"
@@ -777,117 +985,50 @@ class Miner(BaseNeuron, HealthServerMixin):
             optimizer_state_average = None
             weight_counter = 0
             optimizer_state_counter = 0
-            weight_start_idx, weight_end_idx = None, None
-            optimizer_state_start_idx, optimizer_state_end_idx = None, None
 
-            # Loop over the paths and download the chunks from all miners.
-            for packet in weight_path_per_layer:
-                logger.debug(f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | packet: {packet}")
-                weights_path = packet.weights_path_presigned
-                weight_metadata_path = packet.weight_metadata_path_presigned
-                optimizer_state_path = packet.optimizer_state_path_presigned
-                optimizer_state_metadata_path = packet.optimizer_state_metadata_path_presigned
-                weight_metadata_key = packet.weight_metadata_path
-                optimizer_state_metadata_key = packet.optimizer_state_metadata_path
-
-                # Double check that we have done this correctly with the number of activations processed by the miner.
-                assert packet.weighting_factor is not None, f"Weighting factor is not set for packet: {packet}"
-                weighting_factor = packet.weighting_factor
-
+            results = await asyncio.gather(
+                *[
+                    self.download_partition(metadata=metadata, partition=partition)
+                    for _, metadata in filtered_metadata.items()
+                ]
+            )
+            for metadata, (weights, optimizer_state) in zip(filtered_metadata.values(), results):
                 try:
-                    # This is the 1d sequence of bytes that we are going to merge with the other miners
-                    logger.debug(f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | downloading weights")
-                    weights, weight_metadata = await download_chunk_of_model(
-                        miner_hotkey=self.hotkey,
-                        layer=self.state_manager.layer,
-                        weights_path=weights_path,
-                        metadata_path=weight_metadata_path,
-                        chunk_id=partition.chunk_number,
-                        data_type="weights",
-                        data_path=weights_path,
-                        # device=miner_settings.DEVICE,  # @miners, change this to your device if multigpu
-                    )
-
-                    logger.debug(
-                        f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | downloading optimizer state"
-                    )
-                    optimizer_state, optimizer_state_metadata = await download_chunk_of_model(
-                        miner_hotkey=self.hotkey,
-                        layer=self.state_manager.layer,
-                        weights_path=optimizer_state_path,
-                        metadata_path=optimizer_state_metadata_path,
-                        chunk_id=partition.chunk_number,
-                        data_type="optimizer_state",
-                        data_path=optimizer_state_path,
-                        # device=miner_settings.DEVICE,  # @miners, change this to your device if multigpu
-                    )
-                    logger.debug(
-                        f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | downloaded optimizer state"
-                    )
-
-                    assert (
-                        weight_start_idx is None
-                        or weight_start_idx == weight_metadata["sections"][str(partition.chunk_number)]["start_idx"]
-                    ), f"Weight start idx is not the same for all miners: {weight_start_idx} != {weight_metadata['sections'][str(partition.chunk_number)]['start_idx']}"
-                    assert (
-                        weight_end_idx is None
-                        or weight_end_idx == weight_metadata["sections"][str(partition.chunk_number)]["end_idx"]
-                    ), f"Weight end idx is not the same for all miners: {weight_end_idx} != {weight_metadata['sections'][str(partition.chunk_number)]['end_idx']}"
-                    assert (
-                        optimizer_state_start_idx is None
-                        or optimizer_state_start_idx
-                        == optimizer_state_metadata["sections"][str(partition.chunk_number)]["start_idx"]
-                    ), f"Optimizer state start idx is not the same for all miners: {optimizer_state_start_idx} != {optimizer_state_metadata['sections'][str(partition.chunk_number)]['start_idx']}"
-                    assert (
-                        optimizer_state_end_idx is None
-                        or optimizer_state_end_idx
-                        == optimizer_state_metadata["sections"][str(partition.chunk_number)]["end_idx"]
-                    ), f"Optimizer state end idx is not the same for all miners: {optimizer_state_end_idx} != {optimizer_state_metadata['sections'][str(partition.chunk_number)]['end_idx']}"
-
-                    # Setting variables for the chunk
-                    logger.debug(
-                        f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | setting variables for chunk {partition.chunk_number}"
-                    )
-                    weight_start_idx = weight_metadata["sections"][str(partition.chunk_number)]["start_idx"]
-                    weight_end_idx = weight_metadata["sections"][str(partition.chunk_number)]["end_idx"]
-                    optimizer_state_start_idx = optimizer_state_metadata["sections"][str(partition.chunk_number)][
-                        "start_idx"
-                    ]
-                    optimizer_state_end_idx = optimizer_state_metadata["sections"][str(partition.chunk_number)][
-                        "end_idx"
-                    ]
-                    logger.debug(
-                        f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | weight_start_idx: {weight_start_idx}, weight_end_idx: {weight_end_idx}, optimizer_state_start_idx: {optimizer_state_start_idx}, optimizer_state_end_idx: {optimizer_state_end_idx}"
-                    )
-                    assert (
-                        weight_start_idx is not None and weight_end_idx is not None
-                    ), "Weight missing start or end idx"
-                    assert (
-                        optimizer_state_start_idx is not None and optimizer_state_end_idx is not None
-                    ), "Optimizer missing start or end idx"
+                    if weights is None or optimizer_state is None:
+                        logger.warning(
+                            f"No weights or optimizer state downloaded for miner {self.hotkey[:8]}. Partitions: {partitions}"
+                        )
+                        raise Exception(
+                            f"No weights or optimizer state downloaded for miner {self.hotkey[:8]}. Partitions: {partitions}"
+                        )
 
                     # TODO: We will be changing the way that weights and optimizer states are merged.
+                    weights_metadata = metadata[partition.chunk_number]["weights"]
+                    optimizer_state_metadata = metadata[partition.chunk_number]["optimizer_state"]
+
                     if weight_average is None:
-                        weight_average = weights.to(torch.float32) * weighting_factor
-                        optimizer_state_average = optimizer_state.to(torch.float32) * weighting_factor
+                        weight_average = weights.to(torch.float32) * weights_metadata.weighting_factor
+                        optimizer_state_average = (
+                            optimizer_state.to(torch.float32) * optimizer_state_metadata.weighting_factor
+                        )
 
                     else:
                         # create a running sum of weights weighted by the weighting factor
-                        weight_average += weights.to(torch.float32) * weighting_factor
-                        optimizer_state_average += optimizer_state.to(torch.float32) * weighting_factor
+                        weight_average += weights.to(torch.float32) * weights_metadata.weighting_factor
+                        optimizer_state_average += (
+                            optimizer_state.to(torch.float32) * optimizer_state_metadata.weighting_factor
+                        )
 
-                    weight_counter += weighting_factor
-                    optimizer_state_counter += weighting_factor
+                    weight_counter += weights_metadata.weighting_factor
+                    optimizer_state_counter += optimizer_state_metadata.weighting_factor
 
                     # Clean up temporary weights
                     del weights
                     del optimizer_state
-
                 except Exception as e:
                     logger.exception(
-                        f"Error downloading chunk {partition.chunk_number} from {weights_path} and {weight_metadata_path} for miner {self.hotkey[:8]}: {e}"
+                        f"Error downloading chunk {partition.chunk_number} from {metadata} for miner {self.hotkey[:8]}: {e}"
                     )
-                    continue
 
             if weight_average is None:
                 logger.warning(f"No weights downloaded for miner {self.hotkey[:8]}. Partitions: {partitions}")
@@ -912,9 +1053,11 @@ class Miner(BaseNeuron, HealthServerMixin):
             optimizer_state_upload_response = await self.parse_response(response=optimizer_state_upload_response)
 
             partition.weight_path = weight_upload_response.object_path
-            partition.weight_metadata_path = weight_metadata_key
+            partition.weight_metadata_path = extract_filename_from_url(weights_metadata.weight_metadata_path)
             partition.optimizer_state_path = optimizer_state_upload_response.object_path
-            partition.optimizer_state_metadata_path = optimizer_state_metadata_key
+            partition.optimizer_state_metadata_path = extract_filename_from_url(
+                optimizer_state_metadata.optimizer_state_metadata_path
+            )
 
             final_partitions.append(partition)
 

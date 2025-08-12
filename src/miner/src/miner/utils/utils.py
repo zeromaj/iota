@@ -3,6 +3,8 @@ import time
 from typing import Literal, Optional
 from asyncio.exceptions import TimeoutError
 
+from common.models.miner_models import MetadataInfo
+from common.utils.cache import async_lru
 import numpy as np
 from subnet.utils.s3_torch import download_weights_or_optimizer_state
 import torch
@@ -68,43 +70,58 @@ async def create_metadata(weights_tensor: torch.Tensor, num_sections: int) -> di
     return full_metadata
 
 
+@async_lru(maxsize=5000)
+async def download_metadata(metadata_path: str) -> dict:
+    """Download metadata from a presigned url.
+
+    Args:
+        metadata_path (str): The path to the metadata.
+
+    Returns:
+        dict: The metadata.
+    """
+    metadata_bytes: bytes = await download_file(presigned_url=metadata_path)
+    if len(metadata_bytes) > 100_000:
+        logger.warning(f"Metadata is too large: {len(metadata_bytes)} bytes")
+        raise ValueError(f"Metadata is too large: {len(metadata_bytes)} bytes")
+
+    metadata: dict = json.loads(metadata_bytes)
+    return metadata
+
+
 async def download_chunk_of_model(
     layer: int,
     miner_hotkey: str,
     weights_path: str,
-    metadata_path: str,
+    metadata_info: MetadataInfo,
     chunk_id: int | str,
     data_type: Literal["weights", "optimizer_state"],
     data_path: str,
-) -> tuple[torch.Tensor, dict]:
+) -> torch.Tensor:
     """Download a chunk of the model for a miner.
 
     Args:
         layer (int): The layer of the model.
         miner_hotkey (str): The hotkey of the miner.
-        metadata_path (str): The path to the metadata.
+        weights_path (str): The path to the weights.
+        metadata_info (MetadataInfo): The metadata for the chunk.
         chunk_id (int | str): The chunk id.
         data_type (Literal["weights", "optimizer_state"]): The type of data to download.
         layer (int): The layer of the model.
         data_path (str): The path to the data.
 
     Returns:
-        tuple[torch.Tensor, dict]: The downloaded chunk and the metadata.
+        torch.Tensor: The downloaded chunk
     """
 
     # download the metadata
+    start_time = time.time()
     try:
-        start_time = time.time()
-        logger.debug(f"Miner {miner_hotkey[:8]} | layer {layer} | downloading metadata from {metadata_path}")
-        metadata_bytes: bytes = await download_file(presigned_url=metadata_path)
-        metadata: dict = json.loads(metadata_bytes)
-        logger.debug(f"Miner {miner_hotkey[:8]} | layer {layer} | metadata: {metadata}")
-
-        assert isinstance(metadata, dict), f"Metadata is not a dict: {type(metadata)}"
+        logger.debug(f"Miner {miner_hotkey[:8]} | layer {layer} | metadata: {metadata_info}")
 
         # format the chunk data
         logger.debug(f"Miner {miner_hotkey[:8]} | layer {layer} | formatting chunk data")
-        chunk_data: ChunkData = await format_chunk_data(metadata=metadata, chunk_id=chunk_id)
+        chunk_data: ChunkData = await format_chunk_data(metadata=metadata_info, chunk_id=chunk_id)
 
         logger.debug(f"Miner {miner_hotkey[:8]} | layer {layer} | chunk_data: {chunk_data}")
 
@@ -112,7 +129,8 @@ async def download_chunk_of_model(
             layer=layer,
             chunk_number=chunk_id,
             weight_path=weights_path,
-            weight_metadata_path=metadata_path,
+            weight_metadata_path=metadata_info.weight_metadata_path,
+            optimizer_state_metadata_path=metadata_info.optimizer_state_metadata_path,
             miner_hotkey=miner_hotkey,
             weight_data=chunk_data if data_type == "weights" else ChunkData(),
             optimizer_state_data=chunk_data if data_type == "optimizer_state" else ChunkData(),
@@ -120,10 +138,12 @@ async def download_chunk_of_model(
         logger.debug(f"Miner {miner_hotkey[:8]} | layer {layer} | partition: {partition}")
 
         # only download the chunk we need: we want to form an s3 query which includes the start and end indices
-        weights = await download_weights_or_optimizer_state(path=data_path, partition=partition, data_type=data_type)
+        weights: torch.Tensor = await download_weights_or_optimizer_state(
+            path=data_path, partition=partition, data_type=data_type
+        )
         logger.debug(f"Miner {miner_hotkey[:8]} | layer {layer} | weights: {weights}")
 
-        return weights, metadata
+        return weights
     except TimeoutError as e:
         logger.error(
             f"Timeout error downloading chunk of model. Time taken: {time.time() - start_time} seconds. Started download at {start_time}."
@@ -203,3 +223,29 @@ async def upload_file(
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
         raise
+
+
+from urllib.parse import urlparse
+
+
+def extract_filename_from_url(url):
+    """
+    Extract the filename from a URL, handling both regular paths and query parameters.
+
+    Args:
+        url: The URL to extract filename from
+
+
+    Returns:
+        str: The extracted filename
+    """
+    # Parse the URL
+    parsed_url = urlparse(url)
+
+    # Get the path component
+    path = parsed_url.path
+
+    # Extract filename from path
+    filename = path.split("/")[-1]
+
+    return filename
