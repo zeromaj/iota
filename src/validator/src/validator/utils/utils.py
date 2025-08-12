@@ -75,7 +75,7 @@ def apply_burn_factor(raw_weights: torch.Tensor, burn_factor: float, netuid: int
         netuid (int): The netuid.
         owner_uid (int): The owner uid.
     """
-    if burn_factor <= 1 and netuid == 9 and raw_weights[owner_uid] > burn_factor:
+    if burn_factor <= 1 and netuid == 9 and raw_weights[owner_uid] < burn_factor:
         raw_weights = raw_weights * (1 - burn_factor)
 
         # Add the 1-1/burn factor to the owner uid
