@@ -21,6 +21,18 @@ def timed_lru_cache(seconds: int, maxsize: int = 128):
     return wrapper_decorator
 
 
+def async_lru(maxsize: int = 128):
+    def async_lru_cache_decorator(async_function):
+        @lru_cache(maxsize=maxsize)
+        def cached_async_function(*args, **kwargs):
+            coroutine = async_function(*args, **kwargs)
+            return asyncio.ensure_future(coroutine)
+
+        return cached_async_function
+
+    return async_lru_cache_decorator
+
+
 def async_timed_lru_cache(*lru_cache_args, **lru_cache_kwargs):
     def async_lru_cache_decorator(async_function):
         @timed_lru_cache(*lru_cache_args, **lru_cache_kwargs)

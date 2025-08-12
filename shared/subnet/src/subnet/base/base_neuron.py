@@ -9,7 +9,7 @@ import torch
 from bittensor_wallet import Keypair
 from bittensor_wallet.mock import get_mock_wallet
 from common import settings as common_settings
-from common.models.miner_models import MinerStatus
+from common.models.miner_models import MetadataInfo, MinerStatus
 from common.utils.partitions import MinerPartition, format_chunk_data
 from common.utils.s3_utils import download_file
 from common.utils.shared_states import LayerPhase
@@ -83,6 +83,22 @@ class BaseNeuron:
             presigned_url=partition.optimizer_state_metadata_path
         )
         optimizer_state_metadata: dict = json.loads(optimizer_state_metadata_bytes)
+        weight_metadata = MetadataInfo(
+            start_idx=weight_metadata["sections"][str(partition.chunk_number)]["start_idx"],
+            end_idx=weight_metadata["sections"][str(partition.chunk_number)]["end_idx"],
+            start_byte=weight_metadata["sections"][str(partition.chunk_number)]["start_byte"],
+            end_byte=weight_metadata["sections"][str(partition.chunk_number)]["end_byte"],
+            chunk_dtype=weight_metadata["tensor"]["dtype"].split(".")[-1],
+            chunk_number=partition.chunk_number,
+        )
+        optimizer_state_metadata = MetadataInfo(
+            start_idx=optimizer_state_metadata["sections"][str(partition.chunk_number)]["start_idx"],
+            end_idx=optimizer_state_metadata["sections"][str(partition.chunk_number)]["end_idx"],
+            start_byte=optimizer_state_metadata["sections"][str(partition.chunk_number)]["start_byte"],
+            end_byte=optimizer_state_metadata["sections"][str(partition.chunk_number)]["end_byte"],
+            chunk_dtype=optimizer_state_metadata["tensor"]["dtype"].split(".")[-1],
+            chunk_number=partition.chunk_number,
+        )
         partition.weight_data = await format_chunk_data(weight_metadata, partition.chunk_number)
         partition.optimizer_state_data = await format_chunk_data(optimizer_state_metadata, partition.chunk_number)
         return partition
@@ -153,11 +169,16 @@ class BaseNeuron:
                         f"shard optimizer state downloaded for miner {self.hotkey[:8]}",
                         exception_type=NanInfWarning,
                     )
-
+                    logger.debug(
+                        f"Weight shard shape: {weight_shard.shape}, expected start idx: {new_partition.weight_data.chunk_start_idx}, expected end idx: {new_partition.weight_data.chunk_end_idx}, range: {new_partition.weight_data.chunk_end_idx-new_partition.weight_data.chunk_start_idx}"
+                    )
                     new_weights[
                         new_partition.weight_data.chunk_start_idx : new_partition.weight_data.chunk_end_idx
                     ] = weight_shard
 
+                    logger.debug(
+                        f"Shard optimizer state shape: {shard_optimizer_state.shape}, expected start idx: {new_partition.optimizer_state_data.chunk_start_idx}, expected end idx: {new_partition.optimizer_state_data.chunk_end_idx}, range: {new_partition.optimizer_state_data.chunk_end_idx-new_partition.optimizer_state_data.chunk_start_idx}"
+                    )
                     new_optimizer_state[
                         new_partition.optimizer_state_data.chunk_start_idx : new_partition.optimizer_state_data.chunk_end_idx
                     ] = shard_optimizer_state

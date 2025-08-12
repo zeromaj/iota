@@ -1,4 +1,5 @@
 from typing import Literal
+from common.models.miner_models import MetadataInfo
 from pydantic import BaseModel
 from itertools import combinations
 
@@ -70,7 +71,7 @@ class MinerPartition(BaseModel):
 
 
 async def format_chunk_data(
-    metadata: dict,
+    metadata: MetadataInfo,
     chunk_id: int | str,
 ) -> ChunkData:
     """Download a chunk from the database for a miner that will be used for butterfly all reduce merging.
@@ -87,25 +88,23 @@ async def format_chunk_data(
         assert chunk_id == "all"
 
     # get the chunk in the metadata with the correct chunk_id
-    available_chunk_ids = list(int(k) for k in metadata["sections"].keys())
     if chunk_id == "all":
-        chunk_start_idx = metadata["sections"][str(min(available_chunk_ids))]["start_idx"]
-        chunk_end_idx = metadata["sections"][str(max(available_chunk_ids))]["end_idx"]
-        chunk_start_byte = metadata["sections"][str(min(available_chunk_ids))]["start_byte"]
-        chunk_end_byte = metadata["sections"][str(max(available_chunk_ids))]["end_byte"]
+        chunk_start_idx = metadata.start_idx
+        chunk_end_idx = metadata.end_idx
+        chunk_start_byte = metadata.start_byte
+        chunk_end_byte = metadata.end_byte
     else:
-        chunk = metadata["sections"][str(chunk_id)]
-        chunk_start_idx = chunk["start_idx"]
-        chunk_end_idx = chunk["end_idx"]
-        chunk_start_byte = chunk["start_byte"]
-        chunk_end_byte = chunk["end_byte"]
+        chunk_start_idx = metadata.start_idx
+        chunk_end_idx = metadata.end_idx
+        chunk_start_byte = metadata.start_byte
+        chunk_end_byte = metadata.end_byte
 
     chunk_data = ChunkData(
         chunk_start_idx=chunk_start_idx,
         chunk_end_idx=chunk_end_idx,
         chunk_start_byte=chunk_start_byte,
         chunk_end_byte=chunk_end_byte,
-        chunk_dtype=metadata["tensor"]["dtype"].split(".")[-1],
+        chunk_dtype=metadata.chunk_dtype,
         chunk_length=chunk_end_idx - chunk_start_idx,
     )
 

@@ -23,6 +23,8 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries
         part_size = int(math.ceil(len(data) / len(urls)))
         chunks = [data[i : i + part_size] for i in range(0, len(data), part_size)]
 
+        logger.info(f"uploading {len(chunks)} chunks with part size {part_size}")
+
         for i, (url, chunk) in enumerate(zip(urls, chunks)):
             part_number = i + 1
             # Retry logic for each part

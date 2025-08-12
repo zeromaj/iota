@@ -21,8 +21,8 @@ LLAMA32_CONFIG_100M = {
         "high_freq_factor": 4.0,
         "original_context_length": 8192,
     },
-    "model_splits": [[-1, 1], [1, 5], [5, -1]],
-    # "model_splits": [[-1, 3], [3, -1]],
+    # "model_splits": [[-1, 1], [1, 5], [5, -1]],
+    "model_splits": [[-1, 3], [3, -1]],
     # "model_splits": [[-1, 1], [1, 2], [2, 3], [1, -1]],
 }
 
