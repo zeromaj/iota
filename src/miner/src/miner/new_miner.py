@@ -358,10 +358,14 @@ class Miner(BaseNeuron, HealthServerMixin):
             f"📊 Computed loss {loss:.6f} for activation {input_activation_response.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
         )
 
+        loss_copy: torch.Tensor = loss.clone().detach()
+
         try:
             response = await MinerAPIClient.report_loss(
                 hotkey=self.wallet.hotkey,
-                loss_report=LossReportRequest(activation_id=input_activation_response.activation_id, loss=float(loss)),
+                loss_report=LossReportRequest(
+                    activation_id=input_activation_response.activation_id, loss=loss_copy.item()
+                ),
             )
             response = await self.parse_response(response)
             if hasattr(response, "error_name"):

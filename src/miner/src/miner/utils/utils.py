@@ -81,7 +81,7 @@ async def download_metadata(metadata_path: str) -> dict:
         dict: The metadata.
     """
     metadata_bytes: bytes = await download_file(presigned_url=metadata_path)
-    if len(metadata_bytes) > 100_000:
+    if len(metadata_bytes) > 1_000_000:
         logger.warning(f"Metadata is too large: {len(metadata_bytes)} bytes")
         raise ValueError(f"Metadata is too large: {len(metadata_bytes)} bytes")
 
