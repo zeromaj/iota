@@ -358,9 +358,19 @@ class Miner(BaseNeuron, HealthServerMixin):
             f"📊 Computed loss {loss:.6f} for activation {input_activation_response.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
         )
 
-        loss_copy: torch.Tensor = loss.clone().detach()
+        # Update cache with loss before attempting to report it to handle API errors gracefully
+        self.state_manager.add_to_cache(
+            input_activation_response.activation_id,
+            CacheEntry(
+                input_activations=input_activations,
+                output_activations=loss,
+                state=state,
+                upload_time=time.time(),
+            ),
+        )
 
         try:
+            loss_copy: torch.Tensor = loss.clone().detach()
             response = await MinerAPIClient.report_loss(
                 hotkey=self.wallet.hotkey,
                 loss_report=LossReportRequest(
@@ -370,17 +380,6 @@ class Miner(BaseNeuron, HealthServerMixin):
             response = await self.parse_response(response)
             if hasattr(response, "error_name"):
                 return
-
-            # Update saved activations with loss (keep on CPU), only do this if the loss is not NaN or Inf
-            self.state_manager.add_to_cache(
-                input_activation_response.activation_id,
-                CacheEntry(
-                    input_activations=input_activations,
-                    output_activations=loss,
-                    state=state,
-                    upload_time=time.time(),
-                ),
-            )
 
         except Exception as e:
             logger.error(f"Error reporting loss: {e}")
@@ -419,8 +418,6 @@ class Miner(BaseNeuron, HealthServerMixin):
         output_activations: torch.Tensor = cached_activations.output_activations.to(miner_settings.DEVICE)
 
         state = cached_activations.state
-
-        # TODO: @cryptal-mc activation_grads is none... is that correct?
 
         await self.model_manager._backward(
             layer=self.state_manager.layer,
@@ -1035,7 +1032,6 @@ class Miner(BaseNeuron, HealthServerMixin):
                     )
 
             if weight_average is None:
-                logger.warning(f"No weights downloaded for miner {self.hotkey[:8]}. Partitions: {partitions}")
                 raise Exception(f"No weights downloaded for miner {self.hotkey[:8]}. Partitions: {partitions}")
 
             # Average the weights
