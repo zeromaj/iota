@@ -54,10 +54,18 @@ class ModelManager:
         self.optimizer_step_count: int = 0
         self.backwards_since_reset: int = 0
 
-    async def initialize_model_manager(self, layer: int, device: str, logger_attributes: dict):
-        """
-        Initializes the model, weights, optimizer, tokenizer, and vocab info
+    async def initialize_model_manager(
+        self, model_weights: torch.Tensor, optimizer_state: dict, layer: int, device: str, logger_attributes: dict
+    ):
+        """Initializes the model, weights, optimizer, tokenizer, and vocab info
         for the layer specified.
+
+        Args:
+            model_weights (torch.Tensor): The model weights to set. If None, the model will be initialized with random weights.
+            optimizer_state (dict): The optimizer state to set. If None, the optimizer will be initialized with random state.
+            layer (int): The layer to initialize
+            device (str): The device to initialize the model on
+            logger_attributes (dict): The logger attributes to set
         """
         self.layer = layer
         self.device = device
@@ -78,9 +86,17 @@ class ModelManager:
                 if allocated_memory > total_memory * 0.8:  # If more than 80% already used
                     logger.warning(f"High GPU memory usage detected before model load: {allocated_memory:.2f}GB")
 
-            # Load the model
+            # Load a newly initialized model (ie: has random weights)
             await self._load_model(layer=layer)
             await self._load_optimizer()
+
+            # Load the model weights and optimizer state
+            logger.info(
+                f"⏳ Setting model weights and optimizer state for layer {self.layer} for miner {self.logger_attributes['hotkey'][:8]} on initialization"
+            )
+            await self.set_model_weights_and_optimizer_state(
+                model_weights=model_weights, optimizer_state=optimizer_state
+            )
 
             # Load the tokenizer and vocab info if this is the first or last layer
             if layer == 0 or layer == common_settings.N_LAYERS - 1:
@@ -198,6 +214,24 @@ class ModelManager:
 
         # log the number of parameters
         logger.info(f"Number of parameters in the model: {sum(p.numel() for p in self.model.parameters()) / 1e9}B")
+
+    async def set_model_weights_and_optimizer_state(
+        self, model_weights: torch.Tensor = None, optimizer_state: dict = None
+    ):
+        """
+        sets the model weights and optimizer state for the layer specified.
+        """
+
+        # Ensure that both model weights and optimizer state are provided.
+        if model_weights is not None and optimizer_state is not None:
+            torch.nn.utils.vector_to_parameters(model_weights, self.model.parameters())  # inplace operation.
+            self.optimizer.load_state_dict(optimizer_state)
+        elif model_weights is None and optimizer_state is not None:
+            raise Exception("Model weights must be provided if optimizer state is provided")
+        elif model_weights is not None and optimizer_state is None:
+            raise Exception("Optimizer state must be provided if model weights are provided")
+        else:
+            logger.info("No model weights or optimizer state provided, keeping random weights! 🎲")
 
     async def _load_optimizer(self):
         self.optimizer = torch.optim.AdamW(

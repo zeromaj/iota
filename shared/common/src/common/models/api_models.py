@@ -63,6 +63,7 @@ class WeightUpdate(BaseModel):
 
 class MinerRegistrationResponse(BaseModel):
     layer: int | None = None
+    current_epoch: int | None = None
 
 
 class ValidatorRegistrationResponse(BaseModel):

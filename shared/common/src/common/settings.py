@@ -1,6 +1,6 @@
 import os
 
-from common.configs import LLAMA32_CONFIG_1B, LLAMA32_CONFIG_100M
+from common.configs import LLAMA32_CONFIG_100M, LLAMA32_CONFIG_1B
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -17,7 +17,7 @@ LOG_FILE_ENABLED = os.getenv("LOG_FILE_ENABLED") == "True"
 TEST_MODE = os.getenv("TEST_MODE") == "True"
 
 # Bittensor settings
-__SPEC_VERSION__ = 4065
+__SPEC_VERSION__ = 10_000
 BITTENSOR = os.getenv("BITTENSOR") == "True"
 MAX_NUM_PARTS = int(os.getenv("MAX_NUM_PARTS", 10000))
 NETUID = int(os.getenv("NETUID", "9"))
