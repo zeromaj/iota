@@ -52,10 +52,14 @@ class BaseNeuron:
 
         return self
 
-    async def _setup_local_model(self, layer: int, device: str) -> bool:
+    async def _setup_local_model(
+        self, model_weights: torch.Tensor, optimizer_state: dict, layer: int, device: str
+    ) -> bool:
         try:
-            logger.info(f"📥 Attempting to load model for layer {layer} for miner {self.hotkey}")
+            logger.info(f"📥 Attempting to load model for layer {layer} for {self.hotkey[:8]}")
             await self.model_manager.initialize_model_manager(
+                model_weights=model_weights,
+                optimizer_state=optimizer_state,
                 layer=layer,
                 device=device,
                 logger_attributes={
@@ -104,7 +108,7 @@ class BaseNeuron:
         return partition
 
     async def download_and_set_weights_and_optimizer_state(
-        self, layer_idx: int, device: str, parser: Callable = None
+        self, layer_idx: int, device: str, parser: Callable = None, epoch: int = None
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Downloads the weights for a given layer and device.
 
@@ -114,23 +118,34 @@ class BaseNeuron:
             layer_idx (int): The layer index to download weights for
             device (str): The device to download weights for
             parser (Callable, optional): A parser function to parse the response from the API. Defaults to None.
+            epoch (int, optional): The epoch to download weights for. Defaults to None.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor] | None: The weights and optimizer state for the layer
         """
+
+        if epoch == 1:
+            logger.info("Run level epoch == 1, Initializing with random weights to initialize training. 🎲")
+            return
+
+        partition_download_error_counter: int = 0
+
         try:
             response: list[MinerPartition] = await CommonAPIClient.get_merged_partitions(hotkey=self.wallet.hotkey)
 
             merged_partitions: list[MinerPartition] = await parser(response) if parser else response
             total_parts = len(merged_partitions) if merged_partitions else 0
-            logger.info(f"Preparing to download {total_parts} merged partitions for layer {layer_idx}")
 
             if not merged_partitions:
-                logger.warning("No merged partitions found. Initializing with random weights. 🎲")
+                logger.warning(f"No merged partitions found for epoch {epoch} for miner {self.hotkey[:8]}❗️")
                 return
 
-            # Allocate memory to the full 1d tensor
-            new_weights = torch.nn.utils.parameters_to_vector(self.model_manager.model.parameters())
+            logger.info(
+                f"Preparing to download {total_parts} merged partitions for layer {layer_idx} and epoch {epoch}"
+            )
+
+            # Allocate memory to the full 1d tensor, clone to avoid modifying the original weights in place.
+            new_weights = torch.nn.utils.parameters_to_vector(self.model_manager.model.parameters()).clone()
             check_for_nans_and_infs(
                 new_weights, f"current weights for miner {self.hotkey[:8]}", exception_type=NanInfWarning
             )
@@ -187,24 +202,27 @@ class BaseNeuron:
                     )
 
                 except Exception as e:
-                    logger.exception(f"Error downloading partition {partition}: {e}")
+                    logger.warning(f"Error downloading partition {partition}: {e}")
+                    partition_download_error_counter += 1
+
+            logger.debug(f"Downloaded {total_parts - partition_download_error_counter} / {total_parts} partitions")
 
             # assign weights to self.model
             # reshape thecomplete 1D tensor into the appropriate shape
-            new_optimizer_state_dict = reconstruct_optimizer_state(
+            new_optimizer_state_dict: dict = reconstruct_optimizer_state(
                 flat_tensor=new_optimizer_state, tensor_shapes=tensor_shapes, state_dict=state_dict
             )
 
-            # Set the optimizer state.
-            self.model_manager.optimizer.load_state_dict(new_optimizer_state_dict)
-
-            # Set's the weights of the model.
-            torch.nn.utils.vector_to_parameters(new_weights, self.model_manager.model.parameters())
+            logger.info(
+                f"⏳ Setting model weights and optimizer state for layer {layer_idx} for miner {self.hotkey[:8]} on download"
+            )
+            await self.model_manager.set_model_weights_and_optimizer_state(
+                model_weights=new_weights, optimizer_state=new_optimizer_state_dict
+            )
 
             logger.success(
                 f"✅ Successfully downloaded and applied weights and optimizer state to model for layer {layer_idx}"
             )
 
-        except Exception as e:
-            logger.exception(f"Error downloading weights: {e}")
+        except Exception:
             raise

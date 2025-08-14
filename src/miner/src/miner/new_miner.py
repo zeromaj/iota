@@ -552,15 +552,22 @@ class Miner(BaseNeuron, HealthServerMixin):
                     hotkey=self.wallet.hotkey
                 )
 
+                assigned_layer = int(response.layer)
+                current_epoch = int(response.current_epoch)
+
                 if response.layer is None:
                     raise Exception(
                         f"Miner {self.hotkey[:8]} registered with no layer assigned, this should not happen"
                     )
 
-                self.state_manager.set_layer(int(response.layer))
+                self.state_manager.set_layer(assigned_layer)
+                self.state_manager.training_epoch_when_registered = current_epoch
 
-                logger.success(f"✅ Miner {self.hotkey[:8]} registered successfully in layer {self.state_manager.layer}")
+                logger.success(
+                    f"✅ Miner {self.hotkey[:8]} registered successfully in layer {self.state_manager.layer} on training epoch {current_epoch}"
+                )
                 return
+
             except Exception as e:
                 logger.exception(f"Error registering miner: {e}")
                 await asyncio.sleep(10)
@@ -710,18 +717,38 @@ class Miner(BaseNeuron, HealthServerMixin):
         logger.info(f"🔄 Resetting miner {self.hotkey[:8]} entire state")
 
         self.state_manager.reset()
+
+        # TODO: This wont work if we start moving miners across layers depending on the epoch.
+        if self.model_manager.model is not None and self.model_manager.optimizer is not None:
+            current_model_weights: torch.Tensor = torch.nn.utils.parameters_to_vector(
+                self.model_manager.model.parameters()
+            )
+            current_model_optimizer_state: dict = self.model_manager.optimizer.state_dict()
+        else:
+            current_model_weights = None
+            current_model_optimizer_state = None
+
+        # Reset the state of the model, gpu memory, etc.. to ensure a clean epoch.
         self.model_manager.reset()
 
         await self.register_loop()
 
-        if not await self._setup_local_model(layer=self.state_manager.layer, device=miner_settings.DEVICE):
+        if not await self._setup_local_model(
+            model_weights=current_model_weights,
+            optimizer_state=current_model_optimizer_state,
+            layer=self.state_manager.layer,
+            device=miner_settings.DEVICE,
+        ):
             raise Exception("Error setting up local model")
 
         logger.success(f"✅ Successfully setup local model for miner {self.hotkey[:8]}")
 
         try:
             await self.download_and_set_weights_and_optimizer_state(
-                layer_idx=self.state_manager.layer, device=miner_settings.DEVICE, parser=self.parse_response
+                layer_idx=self.state_manager.layer,
+                device=miner_settings.DEVICE,
+                parser=self.parse_response,
+                epoch=self.state_manager.training_epoch_when_registered,
             )
         except Exception as e:
             logger.exception(

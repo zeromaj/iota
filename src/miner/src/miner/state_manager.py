@@ -36,6 +36,7 @@ class StateManager:
         self.backwards_since_reduce: int = 0
         self.backwards_since_sync: int = 0
         self.epoch: int = 0
+        self.training_epoch_when_registered: int = None
 
     def set_state(self, state: LayerPhase):
         self.state = state
@@ -110,3 +111,4 @@ class StateManager:
         self.losses_since_reduce = []
         self.backwards_since_reduce = 0
         self.backwards_since_sync = 0
+        self.training_epoch_when_registered = None

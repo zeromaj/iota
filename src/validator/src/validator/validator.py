@@ -555,7 +555,12 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
             logger.success(f"✅ Validator {self.hotkey[:8]} registered successfully in layer {self.layer}")
 
             # Setup local model
-            if not await self._setup_local_model(layer=self.layer, device=validator_settings.DEVICE):
+            if not await self._setup_local_model(
+                layer=self.layer,
+                device=validator_settings.DEVICE,
+                model_weights=None,
+                optimizer_state=None,
+            ):
                 raise Exception("Error setting up local model")
 
             logger.success(f"🖥️  Validator {self.hotkey[:8]} model setup completed for layer {self.layer}")
