@@ -1,8 +1,7 @@
 from typing import Literal
 from common.models.miner_models import MetadataInfo
 from pydantic import BaseModel
-from itertools import combinations
-
+import copy
 import random
 
 
@@ -17,23 +16,25 @@ def assign_cells_to_pairs(miner_hotkeys: list[str], n_partitions: int) -> dict[i
         dict[int, tuple[str, str]]: A dictionary of partition numbers to pairs of miner hotkeys.
     """
     if len(miner_hotkeys) == 1:
-        return {0: (miner_hotkeys[0], None)}
+        return {i: (miner_hotkeys[0], None) for i in range(n_partitions)}
 
-    pairs = list(combinations(miner_hotkeys, 2))
-
-    MINIMUM_PARTITIONS_PER_MINER = 2
-    miner_counts = {miner: MINIMUM_PARTITIONS_PER_MINER for miner in miner_hotkeys}
-
-    for _ in range(max(0, n_partitions - len(pairs))):
-        # Find miners with the lowest count
+    pairs = []
+    shuffled_miners = []
+    for _ in range(n_partitions):
         selected_miners = []
-        for _ in range(MINIMUM_PARTITIONS_PER_MINER):
-            min_count = min(miner_counts.values())
-            lowest_count_miners = [miner for miner, count in miner_counts.items() if count == min_count]
-            # Select two miners randomly from those with the lowest count
-            selected_miner = random.choice(lowest_count_miners)
-            selected_miners.append(selected_miner)
-            miner_counts[selected_miner] += 1
+        while True:
+            # If we found both miners for the pair, break
+            if len(selected_miners) == 2:
+                break
+
+            # If we don't have any miners left to choose from, shuffle the list and start over
+            if len(shuffled_miners) == 0:
+                shuffled_miners = copy.deepcopy(miner_hotkeys)
+                random.shuffle(shuffled_miners)
+
+            # If the miner is not already in the pair, add it
+            if (selected_miner := shuffled_miners.pop()) not in selected_miners:
+                selected_miners.append(selected_miner)
 
         pairs.append(tuple(selected_miners))
 

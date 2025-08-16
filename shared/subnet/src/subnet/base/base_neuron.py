@@ -205,7 +205,9 @@ class BaseNeuron:
                     logger.warning(f"Error downloading partition {partition}: {e}")
                     partition_download_error_counter += 1
 
-            logger.debug(f"Downloaded {total_parts - partition_download_error_counter} / {total_parts} partitions")
+            logger.debug(
+                f"Downloaded {total_parts - partition_download_error_counter} / {total_parts} partitions inside download_and_set_weights_and_optimizer_state for hotkey {self.hotkey[:8]}"
+            )
 
             # assign weights to self.model
             # reshape thecomplete 1D tensor into the appropriate shape

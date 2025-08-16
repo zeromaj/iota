@@ -466,7 +466,7 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
                 uids=processed_weight_uids,
                 weights=processed_weights,
                 wait_for_finalization=False,
-                version_key=common_settings.__SPEC_VERSION__,
+                version_key=common_settings.__VALIDATOR_SPEC_VERSION__,
             )
 
             if success:
