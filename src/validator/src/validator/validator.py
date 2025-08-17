@@ -258,8 +258,14 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
 
                 logger.debug(f"Weight loop iteration {loop_count} completed successfully")
 
+            except TimeoutError as e:
+                logger.error(f"TimeoutError in weight loop iteration {loop_count}: {e}")
+                self.set_weights(weights=self.copy_weights_from_chain())
+
             except Exception as e:
                 logger.exception(f"Error in weight loop iteration {loop_count}: {e}")
+                self.set_weights(weights=self.copy_weights_from_chain())
+
             finally:
                 logger.info(
                     f"💤 Weight submission loop sleeping for {validator_settings.WEIGHT_SUBMIT_INTERVAL} seconds 💤"
