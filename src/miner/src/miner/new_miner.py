@@ -678,8 +678,8 @@ class Miner(BaseNeuron, HealthServerMixin):
         except KeyboardInterrupt:
             logger.info(f"Gracefully shutting down miner {self.hotkey[:8]}")
 
-        except SpecVersionException as e:
-            logger.error(f"Spec version mismatch. Please pull the latest code and restart the miner: {e}")
+        except SpecVersionException:
+            logger.error("Spec version mismatch. Please pull the latest code and restart the miner")
             raise
 
         except Exception as e:
