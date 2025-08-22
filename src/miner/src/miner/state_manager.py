@@ -37,6 +37,7 @@ class StateManager:
         self.backwards_since_sync: int = 0
         self.epoch: int = 0
         self.training_epoch_when_registered: int = None
+        self.num_metadata_chunks: int | None = None
 
     def set_state(self, state: LayerPhase):
         self.state = state
