@@ -42,7 +42,7 @@ from subnet.base.base_neuron import BaseNeuron
 from subnet.miner_api_client import MinerAPIClient
 from subnet.model.utils import compute_loss
 from subnet.test_client import TestAPIClient
-from subnet.utils.s3_torch import download_activation
+from subnet.utils.s3_torch import download_tensor
 from subnet.utils.vector_utils import check_for_nans_and_infs, flatten_optimizer_state
 
 from miner import settings as miner_settings
@@ -272,7 +272,7 @@ class Miner(BaseNeuron, HealthServerMixin):
             input_activations = await self.download_sample(download_url=activation.presigned_download_url)
         else:
             # Download activation from S3
-            input_activations = await download_activation(
+            input_activations = await download_tensor(
                 path=activation.presigned_download_url, device=miner_settings.DEVICE
             )
             if not common_settings.MOCK:
@@ -403,7 +403,7 @@ class Miner(BaseNeuron, HealthServerMixin):
         if self.state_manager.layer != common_settings.N_LAYERS - 1 and common_settings.N_LAYERS > 1:
             # For backward pass, we need to get activations that we have cached forward activations for
             # So we still need to list first, then filter, then randomly select
-            activation_grads: torch.Tensor = await download_activation(
+            activation_grads: torch.Tensor = await download_tensor(
                 path=activation.presigned_download_url, device=miner_settings.DEVICE
             )
             if not common_settings.MOCK:
