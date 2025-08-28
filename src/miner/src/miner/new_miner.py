@@ -308,7 +308,7 @@ class Miner(BaseNeuron, HealthServerMixin):
             return await self.backward(activation=activation)
 
         # If we are not on the last layer, we just need to upload the activations
-        upload_response = await self.upload_tensor(
+        upload_response: CompleteFileUploadResponse = await self.upload_tensor(
             tensor=output_activations.detach().clone(),
             direction="forward",
         )
