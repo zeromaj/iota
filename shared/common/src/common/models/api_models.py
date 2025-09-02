@@ -3,6 +3,7 @@ from typing import Literal
 from common import settings
 from fastapi import HTTPException
 from pydantic import BaseModel, model_validator
+from common.models.ml_models import ModelConfig, ModelMetadata
 
 
 class WeightsUploadResponse(BaseModel):
@@ -64,6 +65,9 @@ class WeightUpdate(BaseModel):
 class MinerRegistrationResponse(BaseModel):
     layer: int | None = None
     current_epoch: int | None = None
+    model_cfg: ModelConfig | None = None
+    model_metadata: ModelMetadata | None = None
+    run_id: str
 
 
 class ValidatorRegistrationResponse(BaseModel):

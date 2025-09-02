@@ -80,7 +80,9 @@ class CommonAPIClient:
                                 await asyncio.sleep(2)
                             else:
                                 response_json = await response.json()
-                                logger.debug(f"Successfully completed request to {path}")
+                                logger.debug(
+                                    f"Successfully completed request to {path}; response: {str(response_json)[:100]}"
+                                )
                                 return response_json
             except Exception as e:
                 # Log with request ID if we have one

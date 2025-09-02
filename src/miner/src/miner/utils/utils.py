@@ -1,8 +1,14 @@
+import asyncio
 import json
+from urllib.parse import urlparse
+
 from typing import Literal, Optional
 
 from common.utils.cache import async_lru
+from common.utils.exceptions import LayerStateException, NanInfException
 from common.utils.formulas import calculate_num_parts
+from common.utils.shared_states import LayerPhase
+from subnet.utils.vector_utils import check_for_nans_and_infs
 import torch
 from bittensor_wallet import Keypair
 from common import settings as common_settings
@@ -14,7 +20,7 @@ from common.models.api_models import (
 )
 from common.utils.s3_utils import download_file
 from loguru import logger
-from subnet.miner_api_client import MinerAPIClient
+from subnet.miner_api_client import MinerAPIClient, MinerS3Client
 
 
 async def create_metadata(weights_tensor: torch.Tensor, num_sections: int) -> dict:
@@ -119,7 +125,7 @@ async def upload_file(
 
         if file_upload_response is None:
             # Get presigned urls from orchestrator
-            file_upload_response: FileUploadResponse | dict = await MinerAPIClient.initiate_file_upload_request(
+            file_upload_response: FileUploadResponse | dict = await MinerS3Client.initiate_file_upload_request(
                 hotkey=hotkey,
                 file_upload_request=FileUploadRequest(file_type=file_type, num_parts=num_parts),
             )
@@ -129,13 +135,13 @@ async def upload_file(
                 return file_upload_response
 
         # Upload data to presigned urls
-        parts: list[dict] = await MinerAPIClient.upload_multipart_to_s3(
+        parts: list[dict] = await MinerS3Client.upload_multipart_to_s3(
             urls=file_upload_response.urls, data=data, upload_id=file_upload_response.upload_id
         )
 
         # Complete file upload. Necessary to notify orchestrator that all parts have been uploaded.
         complete_file_upload_response: CompleteFileUploadResponse | dict = (
-            await MinerAPIClient.complete_file_upload_request(
+            await MinerS3Client.complete_file_upload_request(
                 hotkey=hotkey,
                 file_upload_completion_request=FileUploadCompletionRequest(
                     object_name=file_upload_response.object_name,
@@ -155,7 +161,51 @@ async def upload_file(
         raise
 
 
-from urllib.parse import urlparse
+async def upload_tensor(
+    tensor: torch.Tensor,
+    hotkey: Keypair,
+    file_type: Literal["activation", "weights", "optimizer_state"] = "activation",
+) -> CompleteFileUploadResponse:
+    initiate_response: FileUploadResponse | dict = await MinerS3Client.initiate_file_upload_request(
+        hotkey=hotkey,
+        file_upload_request=FileUploadRequest(
+            file_type=file_type,
+            num_parts=1,
+        ),
+    )
+
+    if not initiate_response:
+        raise Exception("Error initiating file upload")
+
+    check_for_nans_and_infs(
+        tensor=tensor,
+        name=f"Uploading tensor of file type {file_type}",
+        exception_type=NanInfException,
+    )
+
+    # Reinterpret tensor memory as bytes in a consistent format (bfloat16 → uint8 bytes)
+    # Always upload as bfloat16-backed bytes to match the downloader's default expectation.
+    tensor_cpu = tensor.detach().to("cpu").to(torch.bfloat16).contiguous()
+    data = tensor_cpu.view(torch.uint8).numpy().tobytes()
+
+    try:
+        parts: list[dict] = await MinerS3Client.upload_multipart_to_s3(
+            urls=initiate_response.urls, data=data, upload_id=initiate_response.upload_id
+        )
+    except Exception as e:
+        logger.error(f"Error uploading multipart to S3: {e}")
+        raise
+
+    response: CompleteFileUploadResponse | dict = await MinerS3Client.complete_file_upload_request(
+        hotkey=hotkey,
+        file_upload_completion_request=FileUploadCompletionRequest(
+            object_name=initiate_response.object_name,
+            upload_id=initiate_response.upload_id,
+            parts=parts,
+        ),
+    )
+
+    return response
 
 
 def extract_filename_from_url(url):
@@ -179,3 +229,21 @@ def extract_filename_from_url(url):
     filename = path.split("/")[-1]
 
     return filename
+
+
+async def wait_for_state(state: LayerPhase, miner_api_client: MinerAPIClient):
+    while True:
+        await asyncio.sleep(5)
+        logger.info(f"Waiting for state {state}")
+        response = await miner_api_client.get_layer_state_request()
+        if response == state.value:
+            logger.info(f"Orchestrator is finally in state {state}")
+            miner_api_client.layer_state = LayerPhase.from_str(response)
+            break
+        elif LayerPhase.from_str(response).next() == state:
+            continue
+        else:
+            miner_api_client.layer_state = LayerPhase.TRAINING
+            raise LayerStateException(
+                f"Miner is out of sync with the orchestrator. Miner is waiting for orchestrator to be in state {state}, but orchestrator is in state {response}, setting state to training"
+            )

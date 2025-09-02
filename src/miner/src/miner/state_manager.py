@@ -1,13 +1,10 @@
 import time
 import torch
 from loguru import logger
-
 from bittensor import Wallet
 from pydantic import BaseModel
 
 from common import settings as common_settings
-from common.models.miner_models import MinerStatus
-from common.utils.shared_states import LayerPhase
 from subnet.miner_api_client import MinerAPIClient
 
 
@@ -21,32 +18,17 @@ class CacheEntry(BaseModel):
         arbitrary_types_allowed = True
 
 
-class StateManager:
-    def __init__(self, wallet: Wallet) -> None:
-        self.wallet = wallet
-        self.layer: int = 0
-        self.state: LayerPhase = LayerPhase.TRAINING
-        self.direction: MinerStatus = MinerStatus.IDLE
-        self.cache: dict[str, CacheEntry] = {}
-        self.backwards_since_reset: int = 0
-        self.processed_activations: int = 0
-        self.merge_participation_count: int = 0
-        self.completed_optim_steps: int = 0
-        self.losses_since_reduce: list = []
-        self.backwards_since_reduce: int = 0
-        self.backwards_since_sync: int = 0
-        self.epoch: int = 0
-        self.training_epoch_when_registered: int = None
-        self.num_metadata_chunks: int | None = None
+class StateManager(BaseModel):
+    wallet: Wallet
+    layer: int = 0
+    cache: dict[str, CacheEntry] = {}
+    backwards_since_reset: int = 0
+    training_epoch_when_registered: int = None
+    num_metadata_chunks: int | None = None
+    run_id: str = None
 
-    def set_state(self, state: LayerPhase):
-        self.state = state
-
-    def set_layer(self, layer: int):
-        self.layer = layer
-
-    def set_direction(self, direction: MinerStatus):
-        self.direction = direction
+    class Config:
+        arbitrary_types_allowed = True
 
     def add_to_cache(self, activation_id: str, data: CacheEntry):
         self.cache[activation_id] = data
@@ -54,15 +36,15 @@ class StateManager:
     def remove_from_cache(self, activation_id: str):
         del self.cache[activation_id]
 
-    async def out_of_cache(self) -> bool:
+    async def out_of_cache(self, miner_api_client: MinerAPIClient) -> bool:
         if ooc := len(self.cache) >= common_settings.MAX_ACTIVATION_CACHE_SIZE:
             logger.info(
                 f"Miner {self.wallet.hotkey} cache full with {len(self.cache)} activations: {self.cache.keys()}"
             )
 
             # Clean up inactive activations
-            activations_to_remove: dict[str, bool] = await MinerAPIClient.sync_activation_assignments(
-                activation_ids=list(self.cache.keys()), hotkey=self.wallet.hotkey
+            activations_to_remove: dict[str, bool] = await miner_api_client.sync_activation_assignments(
+                activation_ids=list(self.cache.keys())
             )
 
             # Remove inactive activations
@@ -103,13 +85,5 @@ class StateManager:
         self.cache = {}
 
         # Reset the states
-        self.state = LayerPhase.TRAINING
-        self.direction = MinerStatus.IDLE
         self.backwards_since_reset = 0
-        self.processed_activations = 0
-        self.merge_participation_count = 0
-        self.completed_optim_steps = 0
-        self.losses_since_reduce = []
-        self.backwards_since_reduce = 0
-        self.backwards_since_sync = 0
         self.training_epoch_when_registered = None
