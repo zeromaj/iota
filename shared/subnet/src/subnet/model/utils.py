@@ -1,7 +1,10 @@
+import gc
+from loguru import logger
+
 from typing import Tuple, Dict, Union
 from transformers import AutoModelForCausalLM, AutoConfig
-import numpy as np
 import torch
+import numpy as np
 
 
 def load_model_from_hf(model_name: str, pretrained: bool, device: Union[str, torch.device]):
@@ -452,3 +455,14 @@ def convert_dtype_string(dtype_str: str):
         return torch.int64
     else:
         raise ValueError(f"Unexpected dtype: {dtype_str}")
+
+
+def _clean_gpu_memory():
+    """Force cleanup of GPU memory."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()  # wait for all in-flight kernels
+        torch.cuda.empty_cache()  # release unused cached blocks
+        torch.cuda.synchronize()  # (optional) make sure the allocator work is finished
+
+    gc.collect()
+    logger.debug(f"Miner GPU memory cleaned. memory: {torch.cuda.memory_allocated() / 1024**3:.2f}GB")

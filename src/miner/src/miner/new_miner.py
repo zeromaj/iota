@@ -1,22 +1,34 @@
+import sys
 import asyncio
+from loguru import logger
 import json
 import time
-from datetime import datetime
-from typing import Literal, Optional
-
 import torch
 import aiohttp
-from common.models.miner_models import ChunkMetadata
-from miner.utils.partition_merging import download_partition, filter_bad_metadata
-from aiohttp import web
 from bittensor import Wallet
+
+from subnet.common_api_client import CommonAPIClient
+from miner.health_server import HealthServerMixin
+from miner.utils.activation_utils import download_sample
+from miner.utils.partition_merging import (
+    download_partition,
+    filter_bad_metadata,
+    get_weight_partition_info,
+)
+from miner import settings as miner_settings
+from miner.state_manager import CacheEntry, StateManager
+from miner.utils.utils import (
+    create_metadata,
+    extract_filename_from_url,
+    upload_file,
+    upload_tensor,
+    wait_for_state,
+)
+
 from common import settings as common_settings
 from common.models.api_models import (
     ActivationResponse,
     CompleteFileUploadResponse,
-    FileUploadCompletionRequest,
-    FileUploadRequest,
-    FileUploadResponse,
     GetTargetsRequest,
     LossReportRequest,
     MinerRegistrationResponse,
@@ -24,7 +36,6 @@ from common.models.api_models import (
     SubmittedWeightsAndOptimizerPresigned,
     WeightUpdate,
 )
-from common.models.error_models import LayerStateError, MinerNotRegisteredError, SpecVersionError
 from common.utils.exceptions import (
     APIException,
     LayerStateException,
@@ -34,191 +45,134 @@ from common.utils.exceptions import (
     SpecVersionException,
     SubmittedWeightsError,
 )
+from common.models.miner_models import ChunkMetadata
 from common.utils.partitions import MinerPartition
-from common.utils.s3_utils import download_file
 from common.utils.shared_states import LayerPhase
-from loguru import logger
-from subnet.base.base_neuron import BaseNeuron
-from subnet.miner_api_client import MinerAPIClient
-from subnet.model.utils import compute_loss
-from subnet.test_client import TestAPIClient
+
 from subnet.utils.s3_torch import download_tensor
 from subnet.utils.vector_utils import check_for_nans_and_infs, flatten_optimizer_state
-
-from miner import settings as miner_settings
-from miner.state_manager import CacheEntry, StateManager
-from miner.utils.utils import (
-    create_metadata,
-    extract_filename_from_url,
-    upload_file,
-)
-
-
-class HealthServerMixin:
-    health_app_runner: Optional[web.AppRunner] = None
-    health_site: Optional[web.TCPSite] = None
-
-    async def _start_health_server(self):
-        """Starts the aiohttp web server for healthchecks."""
-        app = web.Application()
-
-        async def health_handler(request):
-            return web.json_response(
-                {
-                    "status": "healthy",
-                    "hotkey": getattr(self, "hotkey", "N/A"),
-                    "layer": getattr(self, "layer", "N/A"),
-                    "uid": getattr(self, "uid", "N/A"),
-                    "registered": getattr(self, "reregister_needed", True) is False,
-                    "timestamp": time.time(),
-                    "spec_version": common_settings.__SPEC_VERSION__,
-                }
-            )
-
-        app.router.add_get(miner_settings.MINER_HEALTH_ENDPOINT, health_handler)
-
-        self.health_app_runner = web.AppRunner(app)
-        await self.health_app_runner.setup()
-
-        self.health_site = web.TCPSite(
-            self.health_app_runner, miner_settings.MINER_HEALTH_HOST, miner_settings.MINER_HEALTH_PORT
-        )
-        if miner_settings.LAUNCH_HEALTH:
-            await self.health_site.start()
-            logger.info(
-                f"Miner {getattr(self, 'hotkey', 'N/A')} healthcheck API started on "
-                f"http://{miner_settings.MINER_HEALTH_HOST}:{miner_settings.MINER_HEALTH_PORT}{miner_settings.MINER_HEALTH_ENDPOINT}"
-            )
-
-    async def _stop_health_server(self):
-        """Stops the aiohttp web server for healthchecks."""
-        if self.health_site:
-            await self.health_site.stop()
-            logger.info(f"Miner {getattr(self, 'hotkey', 'N/A')} healthcheck API site stopped.")
-            self.health_site = None
-        if self.health_app_runner:
-            await self.health_app_runner.cleanup()
-            logger.info(f"Miner {getattr(self, 'hotkey', 'N/A')} healthcheck API runner cleaned up.")
-            self.health_app_runner = None
+from subnet.utils.partition_utils import save_model_weights_and_optimizer_state, load_model_weights_and_optimizer_state
+from subnet.base.base_neuron import BaseNeuron
+from subnet.miner_api_client import MinerAPIClient
+from subnet.model.utils import _clean_gpu_memory, compute_loss
+from subnet.test_client import TestAPIClient
 
 
 class Miner(BaseNeuron, HealthServerMixin):
     def __init__(self, wallet_name: str | None = None, wallet_hotkey: str | None = None, wallet: Wallet | None = None):
         super().__init__()
-        self.registration_time: str = datetime.now().isoformat()
-        self.init_neuron(wallet_name=wallet_name, wallet_hotkey=wallet_hotkey, mock=common_settings.MOCK, wallet=wallet)
+        self.init_neuron(wallet_name=wallet_name, wallet_hotkey=wallet_hotkey, wallet=wallet)
         self.state_manager: StateManager = StateManager(wallet=self.wallet)
         self.weights_submitted: bool = False
         self.partitions_submitted: bool = False
+        self.miner_api_client: MinerAPIClient = MinerAPIClient(hotkey=self.wallet.hotkey)
 
     async def run(self):
         logger.info(f"🚀 Starting miner {self.hotkey[:8]} | Timeout: {miner_settings.TIMEOUT}s")
+
+        await self.reset_miner_state()
+
         while True:
-            with logger.contextualize(hotkey=self.hotkey[:8], layer=self.state_manager.layer):
-                try:
-                    if not await MinerAPIClient.check_orchestrator_health(hotkey=self.wallet.hotkey):
-                        logger.info(
-                            f"🔄 Orchestrator health check failed for miner {self.wallet.hotkey.ss58_address[:8]}"
-                        )
-                        await self.reset_entire_miner_state()
+            try:
+                if not await CommonAPIClient.check_orchestrator_health(hotkey=self.wallet.hotkey):
+                    logger.info(f"🔄 Orchestrator health check failed for miner {self.wallet.hotkey.ss58_address[:8]}")
+                    await self.reset_miner_state()
 
-                        # A small delay before continuing might be beneficial.
-                        await asyncio.sleep(5)
-                        continue
+                    # A small delay before continuing might be beneficial.
+                    await asyncio.sleep(5)
+                    continue
 
-                    # Final memory check after loading
-                    if torch.cuda.is_available():
-                        allocated_memory = torch.cuda.memory_allocated() / 1024**3  # GB
-                        logger.debug(f"💾 GPU memory: {allocated_memory:.2f}GB")
+                # Final memory check after loading
+                if torch.cuda.is_available():
+                    allocated_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+                    logger.debug(f"💾 GPU memory: {allocated_memory:.2f}GB")
 
-                    if self.state_manager.state == LayerPhase.TRAINING:
-                        await self.step()
-                        self.weights_submitted = False
-                        self.partitions_submitted = False
+                if self.miner_api_client.layer_state == LayerPhase.TRAINING:
+                    await self.step()
+                    self.weights_submitted = False
+                    self.partitions_submitted = False
 
-                    elif self.state_manager.state == LayerPhase.WEIGHTS_UPLOADING:
-                        logger.info(
-                            f"\n\n\n\n\n\n\n\n 🔄 Miner {self.hotkey[:8]} in layer {self.state_manager.layer} submitting weights state!\n\n\n\n\n\n\n\n"
-                        )
-                        if self.weights_submitted:
-                            logger.debug(f"Weights already submitted for miner {self.hotkey[:8]}, skipping")
-                        else:
-                            await self.submit_weights()
-                            self.weights_submitted = True
-                        logger.info(f"🔄 Miner {self.hotkey[:8]} submitted weights, switching to merging partitions")
-                        await self.wait_for_state(state=LayerPhase.MERGING_PARTITIONS)
-
-                    elif self.state_manager.state == LayerPhase.MERGING_PARTITIONS:
-                        logger.info(
-                            f"\n\n\n\n\n\n\n\n 🔄 Miner {self.hotkey[:8]} in layer {self.state_manager.layer} merging partitions state!\n\n\n\n\n\n\n\n"
-                        )
-                        if not self.partitions_submitted:
-                            logger.info(f"🔄 Miner {self.hotkey[:8]} getting weight partition info")
-                            weight_path_per_layer, partitions = await self.get_weight_partition_info()
-
-                            if partitions:
-                                logger.info(f"🔄 Miner {self.hotkey[:8]} merging partitions")
-                                partitions = await self.merge_partitions(
-                                    weight_path_per_layer=weight_path_per_layer,
-                                    partitions=partitions,
-                                )
-                                response = await MinerAPIClient.submit_merged_partitions(
-                                    hotkey=self.wallet.hotkey, merged_partitions=partitions
-                                )
-                                await self.parse_response(response=response)
-
-                            logger.info(f"🔄 Miner {self.hotkey[:8]} merged partitions")
-                            self.partitions_submitted = True
-                            await self.wait_for_state(state=LayerPhase.TRAINING)
-                            await self.reset_entire_miner_state()
-                            self.state_manager.epoch += 1
-
-                        else:
-                            logger.info(f"🔄 Miner {self.hotkey[:8]} already submitted partitions, skipping...")
-                            await self.wait_for_state(state=LayerPhase.TRAINING)
-
+                elif self.miner_api_client.layer_state == LayerPhase.WEIGHTS_UPLOADING:
                     logger.info(
-                        f"🔄 Miner {self.hotkey[:8]} in Layer {self.state_manager.layer} is in state: {self.state_manager.state}"
+                        f"\n\n\n\n\n\n\n\n 🔄 Miner in layer {self.state_manager.layer} submitting weights state!\n\n\n\n\n\n\n\n"
                     )
-                    await asyncio.sleep(1.1)
+                    if self.weights_submitted:
+                        logger.debug(f"Weights already submitted for miner {self.hotkey[:8]}, skipping")
+                    else:
+                        await self.submit_weights()
+                        self.weights_submitted = True
+                    logger.info("🔄 Miner submitted weights, switching to merging partitions")
+                    await wait_for_state(state=LayerPhase.MERGING_PARTITIONS, miner_api_client=self.miner_api_client)
 
-                except LayerStateException as e:
-                    logger.info(f"🔄 Miner {self.hotkey[:8]} layer state change...: {e}")
-                    continue
-                except MinerNotRegisteredException as e:
-                    logger.info(f"🔄 Miner {self.hotkey[:8]} miner not registered error: {e}")
-                    continue
-                except APIException as e:
-                    logger.info(f"🔄 Miner {self.hotkey[:8]} API exception: {e}")
-                    continue
-                except aiohttp.ClientResponseError as e:
-                    logger.info(f"🔄 Miner {self.hotkey[:8]} Client response error: {e}")
-                    continue
-                except NanInfWarning as e:
-                    logger.info(f"⚠️ Miner {self.hotkey[:8]} NaN/Inf warning: {e}")
-                    continue
-                except NanInfException as e:
-                    logger.error(f"❌ Miner {self.hotkey[:8]} NaN/Inf exception: {e}")
-                    raise
-                except Exception:
-                    raise
+                elif self.miner_api_client.layer_state == LayerPhase.MERGING_PARTITIONS:
+                    logger.info(
+                        f"\n\n\n\n\n\n\n\n 🔄 Miner in layer {self.state_manager.layer} merging partitions state!\n\n\n\n\n\n\n\n"
+                    )
+                    if not self.partitions_submitted:
+                        logger.info("🔄 Miner getting weight partition info")
+                        weight_path_per_layer, partitions = await get_weight_partition_info(
+                            layer=self.state_manager.layer, miner_api_client=self.miner_api_client
+                        )
+
+                        if not partitions:
+                            logger.info("🔄 Miner has no partitions to merge")
+                            continue
+                        logger.info("🔄 Miner starting merging partitions")
+                        partitions = await self.merge_partitions(
+                            weight_path_per_layer=weight_path_per_layer,
+                            partitions=partitions,
+                        )
+                        logger.info("🔄 Miner finished merged partitions")
+
+                        self.partitions_submitted = True
+                        await wait_for_state(state=LayerPhase.TRAINING, miner_api_client=self.miner_api_client)
+                        await self.download_and_set_weights_and_optimizer_state(
+                            device=miner_settings.DEVICE,
+                        )
+
+                    else:
+                        logger.info(f"🔄 Miner {self.hotkey[:8]} already submitted partitions, skipping...")
+                        await wait_for_state(state=LayerPhase.TRAINING, miner_api_client=self.miner_api_client)
+
+                logger.info(
+                    f"🔄 Miner {self.hotkey[:8]} in Layer {self.state_manager.layer} is in state: {self.miner_api_client.layer_state}"
+                )
+                await asyncio.sleep(1.1)
+
+            except LayerStateException as e:
+                logger.info(f"🔄 Miner {self.hotkey[:8]} layer state change...: {e}")
+                continue
+            except MinerNotRegisteredException as e:
+                logger.info(f"🔄 Miner {self.hotkey[:8]} miner not registered error: {e}")
+                continue
+            except APIException as e:
+                logger.info(f"🔄 Miner {self.hotkey[:8]} API exception: {e}")
+                continue
+            except aiohttp.ClientResponseError as e:
+                logger.info(f"🔄 Miner {self.hotkey[:8]} Client response error: {e}")
+                continue
+            except NanInfWarning as e:
+                logger.info(f"⚠️ Miner {self.hotkey[:8]} NaN/Inf warning: {e}")
+                continue
+            except NanInfException as e:
+                logger.error(f"❌ Miner {self.hotkey[:8]} NaN/Inf exception: {e}")
+                raise
+            except Exception:
+                raise
 
     async def step(self):
         logger.info(
-            f"🔄 Miner {self.hotkey[:8]} step | Layer: {self.state_manager.layer} | is_training: {self.state_manager.state}"
-        )
-        logger.info(
-            f"🔄 Miner {self.hotkey[:8]} step | Layer: {self.state_manager.layer} | backwards_since_reset: {self.state_manager.backwards_since_reset}"
-        )
-        logger.info(
-            f"🔄 Miner {self.hotkey[:8]} step | Layer: {self.state_manager.layer} | len(cache): {len(self.state_manager.cache)}"
+            f"🔄 Miner {self.hotkey[:8]} step | Layer: {self.state_manager.layer} \n"
+            f"is_training: {self.miner_api_client.layer_state} \n"
+            f"backwards_since_reset: {self.state_manager.backwards_since_reset} \n"
+            f"len(cache): {len(self.state_manager.cache)}"
         )
 
         # Check if any of the activations in the cache have timed out and remove them
-        self.state_manager.check_if_timeout(timeout=common_settings.ACTIVATION_CACHE_TIMEOUT)
+        if len(self.state_manager.cache) == common_settings.MAX_ACTIVATION_CACHE_SIZE:
+            self.state_manager.check_if_timeout(timeout=common_settings.ACTIVATION_CACHE_TIMEOUT)
 
-        response: ActivationResponse | dict = await MinerAPIClient.get_activation(hotkey=self.wallet.hotkey)
-        response = await self.parse_response(response)
+        response: ActivationResponse | dict = await self.miner_api_client.get_activation()
         if not response:
             raise Exception("Error getting activation")
 
@@ -226,20 +180,6 @@ class Miner(BaseNeuron, HealthServerMixin):
             await self.forward(response)
         elif response.direction == "backward":
             await self.backward(response)
-
-    async def download_sample(self, download_url: str) -> torch.Tensor:
-        data = await download_file(presigned_url=download_url)
-        text = data.decode("utf-8")
-
-        if common_settings.MOCK:
-            return torch.randn(size=(100,), dtype=torch.bfloat16).to(miner_settings.DEVICE)
-
-        sample = torch.tensor(self.model_manager.tokenizer.encode(text)).to(miner_settings.DEVICE)
-        if len(sample) < common_settings.SEQUENCE_LENGTH:
-            raise Exception(f"Sample is too short: {len(sample)} < {common_settings.SEQUENCE_LENGTH}")
-
-        sample = sample[: common_settings.SEQUENCE_LENGTH]
-        return sample.unsqueeze(0)
 
     async def forward(self, activation: ActivationResponse | None = None):
         """
@@ -254,7 +194,7 @@ class Miner(BaseNeuron, HealthServerMixin):
         - Reporting the loss to the API
         - Performing the backward pass
         """
-        if await self.state_manager.out_of_cache():
+        if await self.state_manager.out_of_cache(miner_api_client=self.miner_api_client):
             logger.warning(
                 f"⚠️ Miner {self.hotkey[:8]} is out of cache ({len(self.state_manager.cache)}/{common_settings.MAX_ACTIVATION_CACHE_SIZE}), skipping forward pass until backwards have been performed"
             )
@@ -270,7 +210,9 @@ class Miner(BaseNeuron, HealthServerMixin):
         )
         if self.state_manager.layer == 0:
             # Load text file and tokenize
-            input_activations = await self.download_sample(download_url=activation.presigned_download_url)
+            input_activations = await download_sample(
+                download_url=activation.presigned_download_url, tokenizer=self.model_manager.tokenizer
+            )
         else:
             # Download activation from S3
             input_activations = await download_tensor(
@@ -280,10 +222,12 @@ class Miner(BaseNeuron, HealthServerMixin):
                 input_activations = input_activations.reshape(
                     -1,
                     common_settings.SEQUENCE_LENGTH,
-                    common_settings.MODEL_CFG.get("bottleneck_dim") or common_settings.MODEL_CFG["emb_dim"],
+                    self.model_manager.model_config.get("bottleneck_dim") or self.model_manager.model_config["emb_dim"],
                 )
 
         # Perform the actual forward pass
+
+        logger.debug(f"Forwarding activation of size {input_activations.shape}")
         output_activations, state = await self.model_manager._forward(
             layer=self.state_manager.layer, input_activations=input_activations
         )
@@ -298,7 +242,7 @@ class Miner(BaseNeuron, HealthServerMixin):
             ),
         )
 
-        if self.state_manager.layer == common_settings.N_LAYERS - 1:
+        if self.state_manager.layer == self.model_manager.model_metadata["n_splits"] - 1:
             await self.compute_last_layer_loss(
                 output_activations=output_activations,
                 input_activation_response=activation,
@@ -308,85 +252,21 @@ class Miner(BaseNeuron, HealthServerMixin):
             return await self.backward(activation=activation)
 
         # If we are not on the last layer, we just need to upload the activations
-        upload_response: CompleteFileUploadResponse = await self.upload_tensor(
+        upload_response: CompleteFileUploadResponse = await upload_tensor(
             tensor=output_activations.detach().clone(),
-            direction="forward",
-        )
-        upload_response = await self.parse_response(response=upload_response)
-
-        response = await MinerAPIClient.submit_activation_request(
             hotkey=self.wallet.hotkey,
+        )
+
+        await self.miner_api_client.submit_activation_request(
             submit_activation_request=SubmitActivationRequest(
                 activation_id=activation.activation_id,
                 activation_path=upload_response.object_path,
                 direction="forward",
             ),
         )
-        response = await self.parse_response(response=response)
         logger.info(
             f"✅ Successfully completed FORWARD pass for activation {activation.activation_id} on layer {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
         )
-
-    async def compute_last_layer_loss(
-        self,
-        output_activations: torch.Tensor,
-        input_activation_response: ActivationResponse,
-        state: dict,
-        input_activations: torch.Tensor,
-    ):
-        """
-        Performs the backward pass for the last layer.
-        """
-
-        initial_activations_path = await MinerAPIClient.get_targets(
-            get_targets_request=GetTargetsRequest(activation_id=input_activation_response.activation_id),
-            hotkey=self.wallet.hotkey,
-        )
-        initial_activations_path = await self.parse_response(response=initial_activations_path)
-
-        # Target sample is the initial activations
-        sample = await self.download_sample(download_url=initial_activations_path)
-
-        loss: torch.Tensor = compute_loss(
-            mock=common_settings.MOCK,
-            logits=output_activations,
-            targets=sample,
-            vocab_size=self.model_manager.vocab_size,
-            pad_token_id=self.model_manager.eos_token_id,
-            pack=miner_settings.PACK_SAMPLES,
-        )
-
-        check_for_nans_and_infs(tensor=loss, name=f"Loss for miner {self.hotkey[:8]}", exception_type=NanInfException)
-
-        logger.info(
-            f"📊 Computed loss {loss:.6f} for activation {input_activation_response.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
-        )
-
-        # Update cache with loss before attempting to report it to handle API errors gracefully
-        self.state_manager.add_to_cache(
-            input_activation_response.activation_id,
-            CacheEntry(
-                input_activations=input_activations,
-                output_activations=loss,
-                state=state,
-                upload_time=time.time(),
-            ),
-        )
-
-        try:
-            loss_copy: torch.Tensor = loss.clone().detach()
-            response = await MinerAPIClient.report_loss(
-                hotkey=self.wallet.hotkey,
-                loss_report=LossReportRequest(
-                    activation_id=input_activation_response.activation_id, loss=loss_copy.item()
-                ),
-            )
-            response = await self.parse_response(response)
-            if hasattr(response, "error_name"):
-                return
-
-        except Exception as e:
-            logger.error(f"Error reporting loss: {e}")
 
     async def backward(
         self,
@@ -401,7 +281,10 @@ class Miner(BaseNeuron, HealthServerMixin):
             logger.warning(f"⚠️ Activation {activation.activation_id} not found in cache, skipping backward pass")
             return
         activation_grads = None
-        if self.state_manager.layer != common_settings.N_LAYERS - 1 and common_settings.N_LAYERS > 1:
+        if (
+            self.state_manager.layer != self.model_manager.model_metadata["n_splits"] - 1
+            and self.model_manager.model_metadata["n_splits"] > 1
+        ):
             # For backward pass, we need to get activations that we have cached forward activations for
             # So we still need to list first, then filter, then randomly select
             activation_grads: torch.Tensor = await download_tensor(
@@ -411,7 +294,8 @@ class Miner(BaseNeuron, HealthServerMixin):
                 activation_grads = activation_grads.reshape(
                     -1,
                     common_settings.SEQUENCE_LENGTH,
-                    common_settings.MODEL_CFG.get("bottleneck_dim") or common_settings.MODEL_CFG["emb_dim"],
+                    self.model_manager.model_config.get("bottleneck_dim")
+                    or self.model_manager.model_config.get("emb_dim"),
                 )
 
         # Get activations from cache and move back to GPU
@@ -441,9 +325,9 @@ class Miner(BaseNeuron, HealthServerMixin):
             # This is because input activation grads of the first layer do not exist.
             emb_weight = self.model_manager.model.tok_emb.weight
             grad_size = (
-                common_settings.MODEL_CFG["bottleneck_dim"]
-                if common_settings.MODEL_CFG["bottleneck_dim"] is not None
-                else common_settings.MODEL_CFG["emb_dim"]
+                self.model_manager.model_config["bottleneck_dim"]
+                if self.model_manager.model_config["bottleneck_dim"] is not None
+                else self.model_manager.model_config["emb_dim"]
             )
             input_activation_grads = emb_weight.grad[: common_settings.SEQUENCE_LENGTH, :grad_size]
 
@@ -453,76 +337,82 @@ class Miner(BaseNeuron, HealthServerMixin):
         else:
             input_activation_grads = input_activations.grad
 
-        upload_response: CompleteFileUploadResponse = await self.upload_tensor(
+        upload_response: CompleteFileUploadResponse = await upload_tensor(
             tensor=input_activation_grads,
-            direction="backward",
+            hotkey=self.wallet.hotkey,
         )
 
-        response = await MinerAPIClient.submit_activation_request(
-            hotkey=self.wallet.hotkey,
+        response = await self.miner_api_client.submit_activation_request(
             submit_activation_request=SubmitActivationRequest(
                 activation_id=activation.activation_id,
                 activation_path=upload_response.object_path,
                 direction="backward",
             ),
         )
-        response = await self.parse_response(response=response)
         # Remove from cache
         self.state_manager.remove_from_cache(activation.activation_id)
         logger.info(
             f"✅ Successfully completed BACKWARD pass for activation {activation.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
         )
 
-    async def upload_tensor(
+    async def compute_last_layer_loss(
         self,
-        tensor: torch.Tensor,
-        direction: Literal["forward", "backward"] = None,
-        file_type: Literal["activation", "weights", "optimizer_state"] = "activation",
-    ) -> CompleteFileUploadResponse:
-        initiate_response: FileUploadResponse | dict = await MinerAPIClient.initiate_file_upload_request(
-            hotkey=self.wallet.hotkey,
-            file_upload_request=FileUploadRequest(
-                file_type=file_type,
-                num_parts=1,
+        output_activations: torch.Tensor,
+        input_activation_response: ActivationResponse,
+        state: dict,
+        input_activations: torch.Tensor,
+    ):
+        """
+        Performs the backward pass for the last layer.
+        """
+
+        initial_activations_path = await self.miner_api_client.get_targets(
+            get_targets_request=GetTargetsRequest(activation_id=input_activation_response.activation_id),
+        )
+
+        # Target sample is the initial activations
+        sample = await download_sample(download_url=initial_activations_path, tokenizer=self.model_manager.tokenizer)
+
+        loss: torch.Tensor = compute_loss(
+            mock=common_settings.MOCK,
+            logits=output_activations,
+            targets=sample,
+            vocab_size=self.model_manager.vocab_size,
+            pad_token_id=self.model_manager.eos_token_id,
+            pack=miner_settings.PACK_SAMPLES,
+        )
+
+        check_for_nans_and_infs(tensor=loss, name=f"Loss for miner {self.hotkey[:8]}", exception_type=NanInfException)
+
+        logger.info(
+            f"📊 Computed loss {loss:.6f} for activation {input_activation_response.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
+        )
+
+        # Update cache with loss before attempting to report it to handle API errors gracefully
+        self.state_manager.add_to_cache(
+            input_activation_response.activation_id,
+            CacheEntry(
+                input_activations=input_activations,
+                output_activations=loss,
+                state=state,
+                upload_time=time.time(),
             ),
         )
-        initiate_response = await self.parse_response(initiate_response)
-
-        if not initiate_response:
-            raise Exception("Error initiating file upload")
-
-        check_for_nans_and_infs(
-            tensor=tensor,
-            name=f"Uploading tensor of file type {file_type} for miner {self.hotkey[:8]}",
-            exception_type=NanInfException,
-        )
-
-        # Reinterpret tensor memory as bytes in a consistent format (bfloat16 → uint8 bytes)
-        # Always upload as bfloat16-backed bytes to match the downloader's default expectation.
-        tensor_cpu = tensor.detach().to("cpu").to(torch.bfloat16).contiguous()
-        data = tensor_cpu.view(torch.uint8).numpy().tobytes()
 
         try:
-            parts: list[dict] = await MinerAPIClient.upload_multipart_to_s3(
-                urls=initiate_response.urls, data=data, upload_id=initiate_response.upload_id
+            loss_copy: torch.Tensor = loss.clone().detach()
+            response = await self.miner_api_client.report_loss(
+                loss_report=LossReportRequest(
+                    activation_id=input_activation_response.activation_id, loss=loss_copy.item()
+                ),
             )
+            if hasattr(response, "error_name"):
+                return
+
         except Exception as e:
-            logger.error(f"Error uploading multipart to S3: {e}")
-            raise
+            logger.error(f"Error reporting loss: {e}")
 
-        response: CompleteFileUploadResponse | dict = await MinerAPIClient.complete_file_upload_request(
-            hotkey=self.wallet.hotkey,
-            file_upload_completion_request=FileUploadCompletionRequest(
-                object_name=initiate_response.object_name,
-                upload_id=initiate_response.upload_id,
-                parts=parts,
-            ),
-        )
-        response = await self.parse_response(response=response)
-
-        return response
-
-    async def register_loop(self):
+    async def register_loop(self) -> tuple[dict, dict]:
         """
         Register the miner with the orchestrator, acquiring a layer during the process.
         If the miner is not registered, it will try to register every 60 seconds
@@ -541,7 +431,6 @@ class Miner(BaseNeuron, HealthServerMixin):
                         wallet_name=miner_settings.WALLET_NAME,
                         wallet_hotkey=miner_settings.WALLET_HOTKEY,
                         wallet=self.wallet,
-                        mock=common_settings.MOCK,
                     )
                     if not getattr(self, "registered_on_metagraph", True):
                         continue
@@ -552,9 +441,7 @@ class Miner(BaseNeuron, HealthServerMixin):
                     await TestAPIClient.register_to_metagraph(hotkey=self.wallet.hotkey)
 
                 logger.info(f"🔄 Attempting to register miner {self.hotkey[:8]} with orchestrator...")
-                response: MinerRegistrationResponse = await MinerAPIClient.register_miner_request(
-                    hotkey=self.wallet.hotkey
-                )
+                response: MinerRegistrationResponse = await self.miner_api_client.register_miner_request()
 
                 assigned_layer = int(response.layer)
                 current_epoch = int(response.current_epoch)
@@ -564,13 +451,14 @@ class Miner(BaseNeuron, HealthServerMixin):
                         f"Miner {self.hotkey[:8]} registered with no layer assigned, this should not happen"
                     )
 
-                self.state_manager.set_layer(assigned_layer)
+                self.state_manager.layer = assigned_layer
                 self.state_manager.training_epoch_when_registered = current_epoch
+                self.state_manager.run_id = response.run_id
 
                 logger.success(
                     f"✅ Miner {self.hotkey[:8]} registered successfully in layer {self.state_manager.layer} on training epoch {current_epoch}"
                 )
-                return
+                return response.model_cfg.model_dump(), response.model_metadata.model_dump()
 
             except Exception as e:
                 logger.exception(f"Error registering miner: {e}")
@@ -592,8 +480,7 @@ class Miner(BaseNeuron, HealthServerMixin):
             logger.debug(f"Gradients: {[p.grad for p in self.model_manager.model.parameters()]}")
             return
 
-        learning_rate = await MinerAPIClient.get_learning_rate(hotkey=self.wallet.hotkey)
-        learning_rate = await self.parse_response(learning_rate)
+        learning_rate = await self.miner_api_client.get_learning_rate()
         await self.model_manager.local_all_reduce(learning_rate=learning_rate)
 
         flattened_optimizer_state, _, _ = flatten_optimizer_state(
@@ -602,8 +489,8 @@ class Miner(BaseNeuron, HealthServerMixin):
         weights = torch.nn.utils.parameters_to_vector(parameters=self.model_manager.model.parameters())
 
         try:
-            num_splits = await MinerAPIClient.get_num_splits(hotkey=self.wallet.hotkey)
-            self.state_manager.num_metadata_chunks = await self.parse_response(num_splits)
+            num_splits = await self.miner_api_client.get_num_splits()
+            self.state_manager.num_metadata_chunks = num_splits
             if not self.state_manager.num_metadata_chunks:
                 raise Exception("Error getting number of splits")
 
@@ -628,21 +515,18 @@ class Miner(BaseNeuron, HealthServerMixin):
                 )
 
                 path: str | dict = await upload_file(data=tensor_bytes, file_type=name, hotkey=self.wallet.hotkey)
-                path = await self.parse_response(response=path)
 
                 # Upload metadata as activation type since orchestrator doesn't have a metadata type
                 metadata_path = await upload_file(
                     data=json.dumps(metadata).encode(), file_type=metadata_name, hotkey=self.wallet.hotkey
                 )
-                metadata_path = await self.parse_response(response=metadata_path)
 
                 weight_update_dict[name + "_path"] = path
                 weight_update_dict[metadata_name + "_path"] = metadata_path
 
-            response: dict = await MinerAPIClient.submit_weights(
-                hotkey=self.wallet.hotkey, weight_update=WeightUpdate(**weight_update_dict)
+            response: dict = await self.miner_api_client.submit_weights(
+                weight_update=WeightUpdate(**weight_update_dict)
             )
-            response = await self.parse_response(response)
 
             if not response:
                 raise SubmittedWeightsError("Error submitting weights")
@@ -666,61 +550,64 @@ class Miner(BaseNeuron, HealthServerMixin):
         The method runs in a loop and retries on failures with a fixed delay.
         """
 
-        logger.info(f"🚀 Starting miner {self.hotkey[:8]} 🚀")
-        try:
-            # Start the healthcheck server
-            if miner_settings.LAUNCH_HEALTH:
-                await self._start_health_server()
-                logger.info(f"🏥 Health server started for miner {self.hotkey[:8]}")
-            else:
-                logger.warning(
-                    "⚠️ Miner healthcheck API not configured in settings (MINER_HEALTH_PORT missing). Skipping."
-                )
-
-            # Reset the entire miner state, which also downloads the weights and optimizer state.
-            await self.reset_entire_miner_state()
-            await self.run()
-
-        except KeyboardInterrupt:
-            logger.info(f"Gracefully shutting down miner {self.hotkey[:8]}")
-
-        except SpecVersionException:
-            logger.error("Spec version mismatch. Please pull the latest code and restart the miner")
-            raise
-
-        except Exception as e:
-            logger.exception(f"❌ Critical error in run_miner for {self.hotkey[:8]}: {e}")
-            await asyncio.sleep(5)
-
-        finally:
-            logger.info(f"Cleaning up miner {self.hotkey[:8]} on shutdown...")
+        with logger.contextualize(hotkey=self.hotkey[:8], layer=self.state_manager.layer):
+            logger.info("🚀 Starting miner 🚀")
             try:
-                if hasattr(self, "model_manager"):
-                    self.model_manager._clean_gpu_memory()
-
+                # Start the healthcheck server
                 if miner_settings.LAUNCH_HEALTH:
-                    try:
-                        await self._stop_health_server()
-                        logger.info(f"🏥 Health server stopped for miner {self.hotkey[:8]}")
-                    except Exception as e:
-                        logger.error(f"Failed to stop health server for miner {self.hotkey[:8]}: {e}")
+                    await self._start_health_server()
+                    logger.info("🏥 Health server started")
+                else:
+                    logger.warning(
+                        "⚠️ Miner healthcheck API not configured in settings (MINER_HEALTH_PORT missing). Skipping."
+                    )
+
+                # Reset the entire miner state, which also downloads the weights and optimizer state.
+                await self.run()
+
+            except KeyboardInterrupt:
+                logger.info("Gracefully shutting down miner")
+
+            except SpecVersionException:
+                logger.error("Spec version mismatch. Please pull the latest code and restart the miner")
+                raise
 
             except Exception as e:
-                logger.error(f"Failed to shutdown miner {self.hotkey[:8]}: {e}")
+                logger.exception(f"❌ Critical error in run_miner: {e}")
+                await asyncio.sleep(5)
 
-        # Final cleanup when exiting the loop (only reached on KeyboardInterrupt)
-        logger.info(f"🛑 Miner {self.hotkey[:8]} shutdown complete")
+            finally:
+                logger.info(f"Saving current model weights and optimizer state for miner {self.hotkey[:8]} on shutdown")
+                save_model_weights_and_optimizer_state(
+                    model_weights=torch.nn.utils.parameters_to_vector(self.model_manager.model.parameters()),
+                    optimizer_state_dict=self.model_manager.optimizer.state_dict(),
+                    hotkey=self.hotkey,
+                    run_id=self.state_manager.run_id,
+                )
+                logger.info("Cleaning up miner on shutdown...")
+                try:
+                    _clean_gpu_memory()
 
-        # Miners can sometimes not clean themselves up properly. Therefore, lets force kill the process.
-        import sys
+                    try:
+                        await self._stop_health_server()
+                        logger.info("🏥 Health server stopped")
+                    except Exception as e:
+                        logger.error(f"Failed to stop health server: {e}")
 
-        sys.exit(0)
+                except Exception as e:
+                    logger.error(f"Failed to shutdown miner: {e}")
 
-    async def reset_entire_miner_state(self):
+            # Final cleanup when exiting the loop (only reached on KeyboardInterrupt)
+            logger.info("🛑 Miner shutdown complete")
+
+            # Miners can sometimes not clean themselves up properly. Therefore, lets force kill the process.
+            sys.exit(0)
+
+    async def reset_miner_state(self):
         """
         Reset the entire miner state, including the API client, health server, and all other state.
         """
-        logger.info(f"🔄 Resetting miner {self.hotkey[:8]} entire state")
+        logger.info("🔄 Resetting miner entire state between epochs!")
 
         self.state_manager.reset()
 
@@ -730,16 +617,28 @@ class Miner(BaseNeuron, HealthServerMixin):
                 self.model_manager.model.parameters()
             )
             current_model_optimizer_state: dict = self.model_manager.optimizer.state_dict()
-        else:
-            current_model_weights = None
-            current_model_optimizer_state = None
 
-        # Reset the state of the model, gpu memory, etc.. to ensure a clean epoch.
+            # Save the current model weights and optimizer state to a file to be loaded in at the beginning of the next epoch.
+            # This is to prevent potentially losing the model weights when stuck on critical miner restarts.
+            save_model_weights_and_optimizer_state(
+                model_weights=current_model_weights,
+                optimizer_state_dict=current_model_optimizer_state,
+                hotkey=self.hotkey,
+                run_id=self.state_manager.run_id,
+            )
+
+        current_model_weights, current_model_optimizer_state = load_model_weights_and_optimizer_state(
+            hotkey=self.hotkey, run_id=self.state_manager.run_id
+        )
+
         self.model_manager.reset()
 
-        await self.register_loop()
+        # We provide the model config and metadata so that all miners are aligned.
+        model_config, model_metadata = await self.register_loop()
 
         if not await self._setup_local_model(
+            model_config=model_config,
+            model_metadata=model_metadata,
             model_weights=current_model_weights,
             optimizer_state=current_model_optimizer_state,
             layer=self.state_manager.layer,
@@ -747,50 +646,15 @@ class Miner(BaseNeuron, HealthServerMixin):
         ):
             raise Exception("Error setting up local model")
 
-        logger.success(f"✅ Successfully setup local model for miner {self.hotkey[:8]}")
+        logger.success("✅ Successfully setup local model")
 
         try:
             await self.download_and_set_weights_and_optimizer_state(
-                layer_idx=self.state_manager.layer,
                 device=miner_settings.DEVICE,
-                parser=self.parse_response,
-                epoch=self.state_manager.training_epoch_when_registered,
             )
         except Exception as e:
-            logger.exception(
-                f"Error downloading and setting weights and optimizer state in miner {self.hotkey[:8]}: {e}"
-            )
+            logger.exception(f"Error downloading and setting weights and optimizer state: {e}")
             raise
-
-    async def get_weight_partition_info(
-        self,
-    ) -> tuple[list[SubmittedWeightsAndOptimizerPresigned], list[MinerPartition]]:
-        """
-        Get the weight partition info from the orchestrator. This calls two different API endpoints:
-        - /miner/get_weight_path_per_layer (weight path for the model layer)
-        - /miner/get_partition_indices_by_hotkey (partition indices for the miner)
-
-        Returns:
-            tuple[list[SubmittedWeightsPresigned], list[int]]: The weight partition info and the partition ids
-        """
-        weight_path_per_layer: list[
-            SubmittedWeightsAndOptimizerPresigned
-        ] | dict = await MinerAPIClient.get_weight_path_per_layer(hotkey=self.wallet.hotkey)
-        weight_path_per_layer = await self.parse_response(weight_path_per_layer)
-
-        if not weight_path_per_layer:
-            raise Exception("Error getting weight path per layer")
-
-        logger.debug(f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} getting partitions")
-        partitions: dict = await MinerAPIClient.get_partitions(hotkey=self.wallet.hotkey)
-        partitions = await self.parse_response(partitions)
-        logger.debug(f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} partitions: {partitions}")
-
-        if not partitions:
-            logger.warning(f"No partitions found for miner {self.hotkey[:8]}")
-            return weight_path_per_layer, []
-
-        return weight_path_per_layer, [MinerPartition(**p) for p in partitions]
 
     async def merge_partitions(
         self, weight_path_per_layer: list[SubmittedWeightsAndOptimizerPresigned], partitions: list[MinerPartition]
@@ -812,15 +676,19 @@ class Miner(BaseNeuron, HealthServerMixin):
         number_of_valid_partitions = self.state_manager.num_metadata_chunks
 
         for partition in partitions:
-            if partition.chunk_number >= number_of_valid_partitions:
-                logger.warning(
-                    f"Skipping partition {partition.chunk_number} because it is invalid as it doesn't exist in the metadata chunks"
+            if self.state_manager.num_metadata_chunks is not None:
+                if partition.chunk_number >= number_of_valid_partitions:
+                    logger.warning(
+                        f"Skipping partition {partition.chunk_number} because it is invalid as it doesn't exist in the metadata chunks"
+                    )
+                    continue
+            else:
+                logger.error(
+                    "Somehow, the number of metadata chunks is None, and it shouldn't be...Continuing without the check!"
                 )
-                continue
+
             try:
-                logger.debug(
-                    f"Miner {self.hotkey[:8]} | layer {self.state_manager.layer} | merging partition {partition.chunk_number}"
-                )
+                logger.debug(f"Layer {self.state_manager.layer} | merging partition {partition.chunk_number}")
 
                 weight_average = None
                 optimizer_state_average = None
@@ -839,12 +707,8 @@ class Miner(BaseNeuron, HealthServerMixin):
                 for metadata, (weights, optimizer_state) in zip(filtered_metadata.values(), results):
                     try:
                         if weights is None or optimizer_state is None:
-                            logger.warning(
-                                f"No weights or optimizer state downloaded for miner {self.hotkey[:8]}. Partitions: {partitions}"
-                            )
-                            raise Exception(
-                                f"No weights or optimizer state downloaded for miner {self.hotkey[:8]}. Partitions: {partitions}"
-                            )
+                            logger.warning(f"No weights or optimizer state downloaded. Partitions: {partitions}")
+                            raise Exception(f"No weights or optimizer state downloaded. Partitions: {partitions}")
 
                         # TODO: We will be changing the way that weights and optimizer states are merged.
                         weights_metadata: ChunkMetadata = metadata[partition.chunk_number]["weights"]
@@ -867,12 +731,10 @@ class Miner(BaseNeuron, HealthServerMixin):
                         optimizer_state_counter += optimizer_state_metadata.weighting_factor
 
                     except Exception as e:
-                        logger.exception(
-                            f"Error downloading chunk {partition.chunk_number} from {metadata} for miner {self.hotkey[:8]}: {e}"
-                        )
+                        logger.exception(f"Error downloading chunk {partition.chunk_number} from {metadata}: {e}")
 
                 if weight_average is None:
-                    raise Exception(f"No weights downloaded for miner {self.hotkey[:8]}. Partitions: {partitions}")
+                    raise Exception(f"No weights downloaded. Partitions: {partitions}")
 
                 # Average the weights
                 weight_average /= weight_counter
@@ -880,17 +742,17 @@ class Miner(BaseNeuron, HealthServerMixin):
                 optimizer_state_average /= optimizer_state_counter
                 optimizer_state_average = optimizer_state_average.to(torch.bfloat16)
 
-                weight_upload_response: CompleteFileUploadResponse = await self.upload_tensor(
+                weight_upload_response: CompleteFileUploadResponse = await upload_tensor(
                     tensor=weight_average.detach().cpu(),
                     file_type="weights",
+                    hotkey=self.wallet.hotkey,
                 )
-                weight_upload_response = await self.parse_response(response=weight_upload_response)
 
-                optimizer_state_upload_response: CompleteFileUploadResponse = await self.upload_tensor(
+                optimizer_state_upload_response: CompleteFileUploadResponse = await upload_tensor(
                     tensor=optimizer_state_average.detach().cpu(),
                     file_type="optimizer_state",
+                    hotkey=self.wallet.hotkey,
                 )
-                optimizer_state_upload_response = await self.parse_response(response=optimizer_state_upload_response)
 
                 partition.weight_path = weight_upload_response.object_path
                 partition.optimizer_state_path = optimizer_state_upload_response.object_path
@@ -901,81 +763,18 @@ class Miner(BaseNeuron, HealthServerMixin):
 
                 final_partitions.append(partition)
             except Exception as e:
-                logger.exception(f"Failed to get partition {partition.chunk_number} for miner {self.hotkey[:8]}: {e}")
+                logger.exception(f"Failed to get partition {partition.chunk_number}: {e}")
 
         valid_partitions = []
         for partition in final_partitions:
-            if self.is_partition_valid(partition):
+            if partition.is_valid():
                 valid_partitions.append(partition)
             else:
                 logger.warning(
                     f"Skipping partition {partition.chunk_number} because it is invalid; partition: {partition}"
                 )
 
-        return valid_partitions
+        if not valid_partitions:
+            raise Exception("No valid partitions to submit")
 
-    def is_partition_valid(self, partition: MinerPartition):
-        if (
-            partition.weight_path is None
-            or partition.optimizer_state_path is None
-            or partition.weight_metadata_path is None
-            or partition.optimizer_state_metadata_path is None
-        ):
-            return False
-        return True
-
-    async def register(self):
-        """
-        Register the miner with the orchestrator.
-        """
-        await self.register_loop()
-
-    async def parse_response(self, response: dict):
-        if not isinstance(response, dict):
-            return response
-        if "error_name" not in response:
-            return response
-        if error_name := response["error_name"]:
-            if error_name == LayerStateError.__name__:
-                logger.warning(f"Layer state change: {response['error_dict']}")
-                error_dict = LayerStateError(**response["error_dict"])
-                self.state_manager.set_state(error_dict.actual_status)
-                raise LayerStateException(
-                    f"Miner {self.hotkey[:8]} is moving state from {error_dict.expected_status} to {error_dict.actual_status}"
-                )
-            if error_name == MinerNotRegisteredError.__name__:
-                logger.error(f"Miner not registered error: {response['error_dict']}")
-                await self.register()
-                self.state_manager.reset()
-                raise MinerNotRegisteredException(f"Miner {self.hotkey[:8]} not registered")
-            if error_name == SpecVersionError.__name__:
-                logger.error(f"Spec version mismatch: {response['error_dict']}")
-                raise SpecVersionException(
-                    expected_version=response["error_dict"]["expected_version"],
-                    actual_version=response["error_dict"]["actual_version"],
-                )
-        else:
-            return response
-
-    async def wait_for_state(self, state: LayerPhase):
-        while True:
-            await asyncio.sleep(5)
-            logger.info(f"Waiting for state {state} for miner {self.hotkey[:8]}")
-            response = await MinerAPIClient.get_layer_state_request(hotkey=self.wallet.hotkey)
-            response = await self.parse_response(response)
-            if response == state.value:
-                logger.info(f"Orchestrator is finally in state {state}")
-                self.state_manager.set_state(LayerPhase.from_str(response))
-                break
-            elif LayerPhase.from_str(response).next() == state:
-                continue
-            else:
-                self.state_manager.set_state(LayerPhase.TRAINING)
-                raise LayerStateException(
-                    f"Miner {self.hotkey[:8]} is out of sync with the orchestrator. Miner is waiting for orchestrator to be in state {state}, but orchestrator is in state {response}, setting state to training"
-                )
-
-
-if __name__ == "__main__":
-    new_miner = Miner(wallet_name=miner_settings.WALLET_NAME, wallet_hotkey=miner_settings.WALLET_HOTKEY)
-    asyncio.run(new_miner.run_miner())
+        await self.miner_api_client.submit_merged_partitions(merged_partitions=valid_partitions)

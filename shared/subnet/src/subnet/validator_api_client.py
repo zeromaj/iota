@@ -79,10 +79,12 @@ class ValidatorAPIClient(CommonAPIClient):
             raise e
 
     @classmethod
-    async def fetch_subnet_burn(cls) -> float | None:
+    async def fetch_subnet_burn(cls, hotkey: Keypair) -> float | None:
         """Fetch the subnet burn factor from the orchestrator."""
         try:
-            response: float | None = await cls.orchestrator_request(method="GET", path="/validator/get_subnet_burn")
+            response: float | None = await cls.orchestrator_request(
+                method="GET", path="/validator/get_subnet_burn", hotkey=hotkey
+            )
             if hasattr(response, "error_name"):
                 return response
             return response

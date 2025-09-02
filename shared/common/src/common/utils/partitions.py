@@ -70,6 +70,16 @@ class MinerPartition(BaseModel):
             and self.miner_hotkey == other.miner_hotkey
         )
 
+    def is_valid(self) -> bool:
+        if (
+            self.weight_path is None
+            or self.optimizer_state_path is None
+            or self.weight_metadata_path is None
+            or self.optimizer_state_metadata_path is None
+        ):
+            return False
+        return True
+
 
 async def format_chunk_data(
     metadata: ChunkMetadata,

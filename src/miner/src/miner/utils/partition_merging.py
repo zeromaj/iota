@@ -4,6 +4,7 @@ from common.models.api_models import SubmittedWeightsAndOptimizerPresigned
 from common.utils.partitions import MinerPartition
 from loguru import logger
 from miner.utils.utils import download_metadata
+from subnet.miner_api_client import MinerAPIClient
 from subnet.utils.s3_torch import download_weights_or_optimizer_state
 import torch
 
@@ -248,3 +249,33 @@ async def filter_bad_metadata(
         logger.warning(f"Filtered out {filtered_count} packets due to metadata disagreements")
 
     return filtered_metadata
+
+
+async def get_weight_partition_info(
+    layer: int,
+    miner_api_client: MinerAPIClient,
+) -> tuple[list[SubmittedWeightsAndOptimizerPresigned], list[MinerPartition]]:
+    """
+    Get the weight partition info from the orchestrator. This calls two different API endpoints:
+    - /miner/get_weight_path_per_layer (weight path for the model layer)
+    - /miner/get_partition_indices_by_hotkey (partition indices for the miner)
+
+    Returns:
+        tuple[list[SubmittedWeightsPresigned], list[int]]: The weight partition info and the partition ids
+    """
+    weight_path_per_layer: list[
+        SubmittedWeightsAndOptimizerPresigned
+    ] | dict = await miner_api_client.get_weight_path_per_layer()
+
+    if not weight_path_per_layer:
+        raise Exception("Error getting weight path per layer")
+
+    logger.debug(f"layer {layer} getting partitions")
+    partitions: dict = await miner_api_client.get_partitions()
+    logger.debug(f"layer {layer} partitions: {partitions}")
+
+    if not partitions:
+        logger.warning(f"No partitions found for layer {layer}")
+        return weight_path_per_layer, []
+
+    return weight_path_per_layer, [MinerPartition(**p) for p in partitions]

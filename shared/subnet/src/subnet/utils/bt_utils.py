@@ -1,7 +1,9 @@
 import concurrent
 import functools
+from hashlib import sha256
 from typing import Any
 import bittensor as bt
+from bittensor_wallet import Keypair
 from bittensor_wallet.mock import get_mock_wallet
 from loguru import logger
 import tenacity
@@ -69,23 +71,21 @@ def run_in_thread(func: functools.partial, ttl: int, name=None) -> Any:
         bt.logging.trace(f"{name} cleaned up successfully")
 
 
-def get_wallet(wallet_name: str, wallet_hotkey: str, mock: bool = False) -> bt.wallet:
+def get_wallet(wallet_name: str, wallet_hotkey: str) -> bt.wallet:
     """Get a Bittensor wallet.
 
     Args:
         wallet_name: The name of the wallet
         wallet_hotkey: The hotkey of the wallet
-        mock: Whether to use a mock wallet
     """
-    if mock:
-        # Mock wallet
-        logger.warning("Bittensor is not enabled, using mock wallet")
-        wallet = get_mock_wallet()
-        logger.info(f"Initialized with mock wallet: {wallet}")
+    logger.info(
+        f"Initializing Bittensor wallet: {wallet_name} and hotkey: {wallet_hotkey}. Bittensor is set to {common_settings.BITTENSOR}"
+    )
+    if common_settings.BITTENSOR:
+        wallet = bt.wallet(name=wallet_name, hotkey=wallet_hotkey)
         return wallet
     else:
-        # Real wallet
-        logger.info(f"Initializing Bittensor wallet: {wallet_name} and hotkey: {wallet_hotkey}")
-        wallet = bt.wallet(name=wallet_name, hotkey=wallet_hotkey)
-        logger.info(f"Initialized with wallet: {wallet}")
-        return wallet
+        return get_mock_wallet(
+            hotkey=Keypair.create_from_seed(seed=sha256(wallet_name.encode()).hexdigest()),
+            coldkey=Keypair.create_from_seed(seed=sha256(wallet_hotkey.encode()).hexdigest()),
+        )

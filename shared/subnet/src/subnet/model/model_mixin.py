@@ -1,16 +1,16 @@
-import gc
 import math
+from loguru import logger
+import torch
 
 from common.utils.exceptions import NanInfException
-import torch
+from subnet.model.utils import _clean_gpu_memory
 from common import settings as common_settings
-from loguru import logger
 from subnet.model.loaders import load_model_split
 from subnet.utils.vector_utils import (
     add_artificial_gradients,
     check_for_nans_and_infs,
 )
-from transformers import AutoTokenizer
+from subnet.model.tokenizer import load_tokenizer
 
 
 class MockModel(torch.nn.Module):
@@ -42,38 +42,51 @@ class MockModel(torch.nn.Module):
 
 class ModelManager:
     def __init__(self):
+        self.model_config: dict | None = None
+        self.model_metadata: dict | None = None
         self.model: torch.nn.Module | None = None
         self.optimizer: torch.optim.Optimizer | None = None
-        self.tokenizer: AutoTokenizer | None = None
         self.vocab_size: int | None = None
         self.eos_token_id: int | None = None
         self.layer: int | None = None
         self.device: str | None = None
         self.logger_attributes: dict | None = None
-        self.total_model_params = None
         self.optimizer_step_count: int = 0
-        self.backwards_since_reset: int = 0
 
     async def initialize_model_manager(
-        self, model_weights: torch.Tensor, optimizer_state: dict, layer: int, device: str, logger_attributes: dict
+        self,
+        model_config: dict,
+        model_metadata: dict,
+        model_weights: torch.Tensor,
+        optimizer_state: dict,
+        layer: int,
+        device: str,
+        logger_attributes: dict,
     ):
         """Initializes the model, weights, optimizer, tokenizer, and vocab info
         for the layer specified.
 
         Args:
+            model_config (dict): The model config to set.
+            model_metadata (dict): The model metadata to set.
             model_weights (torch.Tensor): The model weights to set. If None, the model will be initialized with random weights.
             optimizer_state (dict): The optimizer state to set. If None, the optimizer will be initialized with random state.
             layer (int): The layer to initialize
             device (str): The device to initialize the model on
             logger_attributes (dict): The logger attributes to set
         """
+        self.model_config = model_config
+        self.model_metadata = model_metadata
         self.layer = layer
         self.device = device
         self.logger_attributes = logger_attributes
 
+        assert isinstance(self.model_config, dict), "Model config must be a dict"
+        assert isinstance(self.model_metadata, dict), "Model metadata must be a dict"
+
         try:
             # Ensure previous model artifacts are cleared before loading a new one
-            self._clean_gpu_memory()
+            _clean_gpu_memory()
 
             # Check GPU memory before loading model
             if torch.cuda.is_available():
@@ -99,8 +112,8 @@ class ModelManager:
             )
 
             # Load the tokenizer and vocab info if this is the first or last layer
-            if layer == 0 or layer == common_settings.N_LAYERS - 1:
-                await self._load_tokenizer()
+            if layer == 0 or layer == self.model_metadata["n_splits"] - 1:
+                self.tokenizer = load_tokenizer(tokenizer_name=self.model_metadata["tokenizer_name"])
                 await self._load_vocab_info()
 
             # Final memory check after loading
@@ -115,16 +128,6 @@ class ModelManager:
         except Exception as e:
             logger.error(f"Error loading model: {e}")
             raise
-
-    def _clean_gpu_memory(self):
-        """Force cleanup of GPU memory."""
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()  # wait for all in-flight kernels
-            torch.cuda.empty_cache()  # release unused cached blocks
-            torch.cuda.synchronize()  # (optional) make sure the allocator work is finished
-
-        gc.collect()
-        logger.debug(f"Miner GPU memory cleaned. memory: {torch.cuda.memory_allocated() / 1024**3:.2f}GB")
 
     async def _forward(self, layer: int, input_activations: torch.Tensor):
         if layer > 0:
@@ -141,7 +144,7 @@ class ModelManager:
         state: dict,
     ):
         # If this is the last layer, then output_activations is the loss
-        if layer == common_settings.N_LAYERS - 1:
+        if layer == self.model_metadata["n_splits"] - 1:
             try:
                 check_for_nans_and_infs(
                     output_activations,
@@ -160,12 +163,11 @@ class ModelManager:
                 raise
 
     async def clip_gradients(self):
-        if self.total_model_params is None:
-            self.total_model_params = sum(p.numel() for p in self.model.parameters())
-            logger.debug(f"Total model params: {self.total_model_params}")
+        total_model_params: int = sum(p.numel() for p in self.model.parameters())
+        logger.debug(f"Total model params: {total_model_params}")
 
-        split_grad_norm = common_settings.GRAD_CLIP_NORM * math.sqrt(
-            self.total_model_params / common_settings.MODEL_CFG["total_global_params"]
+        split_grad_norm = self.model_metadata["grad_clip_norm"] * math.sqrt(
+            total_model_params / self.model_config["total_global_params"]
         )
 
         torch.nn.utils.clip_grad_norm_(parameters=self.model.parameters(), max_norm=split_grad_norm)
@@ -180,15 +182,16 @@ class ModelManager:
             self.model.train()
             return
 
-        logger.info(f"MODEL_SPLITS: {common_settings.MODEL_SPLITS}")
-        logger.info(f"Loading model from {common_settings.MODEL_CFG['model_name']}")
-        if isinstance(common_settings.MODEL_CFG["dtype"], str):
-            common_settings.MODEL_CFG["dtype"] = getattr(torch, common_settings.MODEL_CFG["dtype"].split(".")[-1])
+        logger.info(f"MODEL_SPLITS: {self.model_metadata['model_splits']}")
+        logger.info(f"Loading model from {self.model_config['model_name']}")
+
+        if isinstance(self.model_config["dtype"], str):
+            self.model_config["dtype"] = getattr(torch, self.model_config["dtype"].split(".")[-1])
 
         try:
             self.model = load_model_split(
-                model_cfg=common_settings.MODEL_CFG,
-                model_split=common_settings.MODEL_SPLITS[layer],
+                model_cfg=self.model_config,
+                model_split=self.model_metadata["model_splits"][layer],
                 device=self.device,
                 seed=42,
             )
@@ -199,13 +202,14 @@ class ModelManager:
             # the bottleneck dynamically changes it size based on the input data.
             if layer > 0:
                 logger.success(f"Populating bottleneck decoder for layer {layer}")
-                self.model.forward(
-                    torch.zeros(
-                        1,
-                        common_settings.SEQUENCE_LENGTH,
-                        common_settings.MODEL_CFG["bottleneck_dim"] or common_settings.MODEL_CFG["emb_dim"],
-                    ).to(self.device)
-                )
+                blank_tensor = torch.zeros(
+                    1,
+                    common_settings.SEQUENCE_LENGTH,
+                    self.model_config["bottleneck_dim"] or self.model_config["emb_dim"],
+                    dtype=self.model_config["dtype"],
+                ).to(self.device)
+
+                self.model.forward(blank_tensor)
 
         except ValueError as e:
             logger.exception(f"{e}")
@@ -261,19 +265,6 @@ class ModelManager:
         self.eos_token_id = self.tokenizer.eos_token_id
         logger.info(f"loaded vocab info: vocab size | {self.vocab_size} | EOS token id | {self.eos_token_id}")
 
-    async def _load_tokenizer(self):
-        logger.info(f"Loading tokenizer from {common_settings.TOKENIZER_NAME}")
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(common_settings.TOKENIZER_NAME, token=common_settings.HF_TOKEN)
-            if tokenizer is None:
-                raise Exception("Error loading tokenizer")
-
-            self.tokenizer = tokenizer
-
-        except Exception as e:
-            logger.exception(f"Error loading tokenizer: {e}")
-            raise
-
     async def local_all_reduce(self, learning_rate: float):
         """local all reduce is for local testing purposes. It's not used in the production code.
 
@@ -314,11 +305,9 @@ class ModelManager:
 
         # Need to delete these because of memory concerns.
         del self.model
-        self.model = None
         del self.optimizer
+        self.model = None
         self.optimizer = None
-        del self.tokenizer
-        self.tokenizer = None
 
         self.vocab_size = None
         self.eos_token_id = None
@@ -327,4 +316,4 @@ class ModelManager:
         self.logger_attributes = None
 
         # clear all the gpu memory and all torch related objects
-        self._clean_gpu_memory()
+        _clean_gpu_memory()
