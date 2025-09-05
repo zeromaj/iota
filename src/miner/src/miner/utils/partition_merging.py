@@ -1,9 +1,13 @@
 import asyncio
+from bittensor_wallet import Keypair
 from common.models.miner_models import ChunkMetadata
-from common.models.api_models import SubmittedWeightsAndOptimizerPresigned
+from common.models.api_models import CompleteFileUploadResponse, SubmittedWeightsAndOptimizerPresigned
+from common.utils.exceptions import WeightPartitionException
 from common.utils.partitions import MinerPartition
+from common.utils.s3_utils import filter_exceptions
 from loguru import logger
-from miner.utils.utils import download_metadata
+from miner import settings as miner_settings
+from miner.utils.utils import download_metadata, extract_filename_from_url, upload_tensor
 from subnet.miner_api_client import MinerAPIClient
 from subnet.utils.s3_torch import download_weights_or_optimizer_state
 import torch
@@ -186,29 +190,27 @@ async def filter_bad_metadata(
     So in our case, the return would look as follows:
 
     {
-        {
-            weight_0: {
-                0: {
-                    "weights": ChunkMetadata(...),
-                    "optimizer_state": ChunkMetadata(...),
-                },
-                ...
-                7: {
-                    "weights": ChunkMetadata(...),
-                    "optimizer_state": ChunkMetadata(...),
-                }
+        weight_0: {
+            0: {
+                "weights": ChunkMetadata(...),
+                "optimizer_state": ChunkMetadata(...),
             },
-            ...,
-            weight_2: {
-                0: {
-                    "weights": ChunkMetadata(...),
-                    "optimizer_state": ChunkMetadata(...),
-                },
-                ...
-                7: {
-                    "weights": ChunkMetadata(...),
-                    "optimizer_state": ChunkMetadata(...),
-                }
+            ...
+            7: {
+                "weights": ChunkMetadata(...),
+                "optimizer_state": ChunkMetadata(...),
+            }
+        },
+        ...,
+        weight_2: {
+            0: {
+                "weights": ChunkMetadata(...),
+                "optimizer_state": ChunkMetadata(...),
+            },
+            ...
+            7: {
+                "weights": ChunkMetadata(...),
+                "optimizer_state": ChunkMetadata(...),
             }
         }
     }
@@ -268,7 +270,7 @@ async def get_weight_partition_info(
     ] | dict = await miner_api_client.get_weight_path_per_layer()
 
     if not weight_path_per_layer:
-        raise Exception("Error getting weight path per layer")
+        raise WeightPartitionException("Unknown error getting weight path per layer")
 
     logger.debug(f"layer {layer} getting partitions")
     partitions: dict = await miner_api_client.get_partitions()
@@ -279,3 +281,157 @@ async def get_weight_partition_info(
         return weight_path_per_layer, []
 
     return weight_path_per_layer, [MinerPartition(**p) for p in partitions]
+
+
+async def merge_partition_batch(
+    batch_partitions: list[MinerPartition],
+    downloaded_partitions: list[list[tuple[torch.Tensor, torch.Tensor]]],
+    filtered_metadata: dict[str, dict[int, dict[str, ChunkMetadata]]],
+    num_metadata_chunks: int,
+) -> dict[int, tuple[torch.Tensor, torch.Tensor, MinerPartition]]:
+    merge_results: dict[MinerPartition, tuple[torch.Tensor, torch.Tensor]] = {}
+    for partition, downloaded_partition in zip(batch_partitions, downloaded_partitions):
+        if num_metadata_chunks is not None:
+            if partition.chunk_number >= num_metadata_chunks:
+                logger.warning(
+                    f"Skipping partition {partition.chunk_number} because it is invalid as it doesn't exist in the metadata chunks"
+                )
+                continue
+        else:
+            logger.warning(f"No metadata chunks found. Skipping partition {partition.chunk_number}")
+        try:
+            logger.debug(f"merging partition {partition.chunk_number}")
+
+            weight_average = None
+            optimizer_state_average = None
+            weight_counter = 0
+            optimizer_state_counter = 0
+
+            print(f"downloaded_partition: {len(downloaded_partition)}")
+            print(f"downloaded_partition[0]: {len(downloaded_partition[0])}")
+            print(f"downloaded_partition[0][0]: {len(downloaded_partition[0][0])}")
+            for metadata, (weights, optimizer_state) in zip(filtered_metadata.values(), downloaded_partition):
+                try:
+                    if weights is None or optimizer_state is None:
+                        logger.warning(f"No weights or optimizer state downloaded. Partitions: {batch_partitions}")
+                        raise Exception(f"No weights or optimizer state downloaded. Partitions: {batch_partitions}")
+
+                    # TODO: We will be changing the way that weights and optimizer states are merged.
+                    weights_metadata: ChunkMetadata = metadata[partition.chunk_number]["weights"]
+                    optimizer_state_metadata: ChunkMetadata = metadata[partition.chunk_number]["optimizer_state"]
+
+                    if weight_average is None:
+                        weight_average = weights.to(torch.float32) * weights_metadata.weighting_factor
+                        optimizer_state_average = (
+                            optimizer_state.to(torch.float32) * optimizer_state_metadata.weighting_factor
+                        )
+
+                    else:
+                        # create a running sum of weights weighted by the weighting factor
+                        weight_average += weights.to(torch.float32) * weights_metadata.weighting_factor
+                        optimizer_state_average += (
+                            optimizer_state.to(torch.float32) * optimizer_state_metadata.weighting_factor
+                        )
+
+                    weight_counter += weights_metadata.weighting_factor
+                    optimizer_state_counter += optimizer_state_metadata.weighting_factor
+
+                except Exception as e:
+                    logger.exception(f"Error downloading chunk {partition.chunk_number} from {metadata}: {e}")
+
+            if weight_average is None:
+                raise Exception(f"No weights downloaded. Partitions: {batch_partitions}")
+
+            # Average the weights
+            weight_average /= weight_counter
+            weight_average = weight_average.to(torch.bfloat16)
+            optimizer_state_average /= optimizer_state_counter
+            optimizer_state_average = optimizer_state_average.to(torch.bfloat16)
+
+            merge_results[partition.chunk_number] = (weight_average, optimizer_state_average, partition)
+            return merge_results
+        except Exception as e:
+            logger.exception(f"Failed to get partition {partition.chunk_number}: {e}")
+
+
+async def get_partition_batch(batch_index: int, partitions: list[MinerPartition]) -> list[MinerPartition]:
+    start_index = batch_index * len(partitions) // min(miner_settings.N_PARTITION_BATCHES, len(partitions))
+    end_index = (batch_index + 1) * len(partitions) // min(miner_settings.N_PARTITION_BATCHES, len(partitions))
+    batch_partitions = partitions[start_index:end_index]
+    return batch_partitions
+
+
+async def download_batch_partitions(
+    batch_partitions: list[MinerPartition], filtered_metadata: dict[str, dict[int, dict[str, ChunkMetadata]]]
+) -> list[list[tuple[torch.Tensor, torch.Tensor]]]:
+    downloaded_partitions = []
+
+    async def download_partition_weights(partition: MinerPartition) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        results: list[tuple[torch.Tensor, torch.Tensor]] = await asyncio.gather(
+            *[
+                download_partition(
+                    weight_metadata=metadata[partition.chunk_number]["weights"],
+                    optimizer_metadata=metadata[partition.chunk_number]["optimizer_state"],
+                )
+                for metadata in filtered_metadata.values()
+            ]
+        )
+        logger.debug(f"Results: {len(results)}")
+        logger.debug(f"Results[0]: {len(results[0])}")
+        return results
+
+    downloaded_partitions: list[list[tuple[torch.Tensor, torch.Tensor]]] = await asyncio.gather(
+        *[download_partition_weights(partition=partition) for partition in batch_partitions],
+        return_exceptions=True,
+    )
+    downloaded_partitions: list[list[tuple[torch.Tensor, torch.Tensor]]] = filter_exceptions(downloaded_partitions)
+    logger.debug(f"Downloaded partitions: {len(downloaded_partitions)}")
+    logger.debug(f"Downloaded partitions[0]: {len(downloaded_partitions[0])}")
+    logger.debug(f"Downloaded partitions[0][0]: {len(downloaded_partitions[0][0])}")
+    return downloaded_partitions
+
+
+async def upload_partition_batch(
+    merge_results: dict[int, tuple[torch.Tensor, torch.Tensor, MinerPartition]],
+    filtered_metadata: dict[str, dict[int, dict[str, ChunkMetadata]]],
+    hotkey: Keypair,
+) -> list[MinerPartition]:
+    weight_uploads = []
+    optimizer_state_uploads = []
+    final_partitions = []
+    for weight_average, optimizer_state_average, _ in merge_results.values():
+        weight_uploads.append(
+            upload_tensor(
+                tensor=weight_average.detach().cpu(),
+                file_type="weights",
+                hotkey=hotkey,
+            )
+        )
+        optimizer_state_uploads.append(
+            upload_tensor(
+                tensor=optimizer_state_average.detach().cpu(),
+                file_type="optimizer_state",
+                hotkey=hotkey,
+            )
+        )
+
+    # Upload all weights at once
+    weight_uploads: list[CompleteFileUploadResponse] = filter_exceptions(
+        await asyncio.gather(*weight_uploads, return_exceptions=True)
+    )
+    optimizer_state_uploads: list[CompleteFileUploadResponse] = filter_exceptions(
+        await asyncio.gather(*optimizer_state_uploads, return_exceptions=True)
+    )
+
+    weights_metadata = list(list(filtered_metadata.values())[0].values())[0]["weights"]
+    optimizer_state_metadata = list(list(filtered_metadata.values())[0].values())[0]["optimizer_state"]
+    for weight_upload, optimizer_state_upload, (_, _, partition) in zip(
+        weight_uploads, optimizer_state_uploads, merge_results.values()
+    ):
+        partition.weight_path = weight_upload.object_path
+        partition.optimizer_state_path = optimizer_state_upload.object_path
+        partition.weight_metadata_path = extract_filename_from_url(weights_metadata.metadata_path)
+        partition.optimizer_state_metadata_path = extract_filename_from_url(optimizer_state_metadata.metadata_path)
+
+        final_partitions.append(partition)
+    return [partition for partition in final_partitions if partition.is_valid()]

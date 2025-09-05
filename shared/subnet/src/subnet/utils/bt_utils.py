@@ -1,7 +1,4 @@
-import concurrent
-import functools
 from hashlib import sha256
-from typing import Any
 import bittensor as bt
 from bittensor_wallet import Keypair
 from bittensor_wallet.mock import get_mock_wallet
@@ -44,31 +41,6 @@ def get_subtensor() -> bt.subtensor:
         return bt.subtensor(network=common_settings.NETWORK)
     else:
         raise Exception("No subtensor found")
-
-
-def run_in_thread(func: functools.partial, ttl: int, name=None) -> Any:
-    """Runs the provided function on a thread with 'ttl' seconds to complete.
-
-    Args:
-        func (functools.partial): Function to be run.
-        ttl (int): How long to try for in seconds.
-
-    Returns:
-        Any: The value returned by 'func'
-    """
-
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-
-    try:
-        future = executor.submit(func)
-        return future.result(timeout=ttl)
-    except concurrent.futures.TimeoutError as e:
-        bt.logging.error(f"Failed to complete '{name}' within {ttl} seconds.")
-        raise TimeoutError(f"Failed to complete '{name}' within {ttl} seconds.") from e
-    finally:
-        bt.logging.trace(f"Completed {name}")
-        executor.shutdown(wait=False)
-        bt.logging.trace(f"{name} cleaned up successfully")
 
 
 def get_wallet(wallet_name: str, wallet_hotkey: str) -> bt.wallet:

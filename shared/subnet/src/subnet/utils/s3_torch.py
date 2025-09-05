@@ -1,31 +1,74 @@
-import asyncio
 from time import time
+from loguru import logger
+
+import asyncio
+from asyncio.exceptions import TimeoutError
 
 import aiohttp
-from common.models.miner_models import ChunkMetadata
 from common.utils.exceptions import NanInfWarning
-import numpy as np
-import torch
-from loguru import logger
+from common.models.miner_models import ChunkMetadata
 from subnet.utils.vector_utils import check_for_nans_and_infs
-from asyncio.exceptions import TimeoutError
+
+import torch
+import numpy as np
+
+
+class AioHttpClientWithOpenSession:
+    def __init__(self):
+        self.SESSION_REFRESH_TIME = 300
+        self.session = None
+        self.session_created_at = time()
+
+    async def close(self):
+        if self.session:
+            await self.session.close()
+
+    async def refresh_session_if_needed(self):
+        if not self.session or time() - self.session_created_at > self.SESSION_REFRESH_TIME:
+            await self.close()
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300))
+            self.session_created_at = time()
+
+    async def get(self, url: str):
+        await self.refresh_session_if_needed()
+        response = await self.session.get(url)
+        return response
+
+
+async def process_response(response: aiohttp.ClientResponse, dtype: torch.dtype, device: str = "cuda") -> torch.Tensor:
+    """Process the response from aiohttp and return a tensor."""
+    content = await response.read()
+    loaded_tensor = np.frombuffer(content, dtype=np.uint8)
+    loaded_tensor = torch.tensor(loaded_tensor).view(dtype).to(device)
+    return loaded_tensor
 
 
 async def download_tensor(
-    path: str, dtype: torch.dtype = torch.bfloat16, device: str = "cuda", max_retries: int = 3
+    path: str,
+    dtype: torch.dtype = torch.bfloat16,
+    device: str = "cuda",
+    max_retries: int = 3,
 ) -> torch.Tensor:
-    """Download bytes and cast into a tensor from S3 storage with retry logic."""
-    timeout = aiohttp.ClientTimeout(total=300)  # 5 minute timeout
+    """Download bytes and cast into a tensor from S3 storage with retry logic.
 
+    Args:
+        path: URL path to download tensor from
+        dtype: PyTorch data type for the tensor
+        device: Device to load tensor to ('cuda', 'cpu', etc.)
+        max_retries: Maximum number of retry attempts
+        session: Optional aiohttp session to reuse. If None, creates a new session.
+
+    Returns:
+        Downloaded tensor
+    """
+
+    # Determine if we need to manage the session ourselves
     for attempt in range(max_retries + 1):
         try:
-            # Download from S3
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(path) as response:
-                    response.raise_for_status()
-                    content = await response.read()
-                    loaded_tensor = np.frombuffer(content, dtype=np.uint8)
-                    loaded_tensor = torch.tensor(loaded_tensor).view(dtype).to(device)
+            # Create new session for single download
+            response = await s3_client.get(path)
+            response.raise_for_status()
+            loaded_tensor = await process_response(response=response, dtype=dtype, device=device)
 
             assert isinstance(
                 loaded_tensor, torch.Tensor
@@ -107,3 +150,6 @@ async def download_weights_or_optimizer_state(
         except Exception as e:
             logger.error(f"Error downloading weights or optimizer state: {e}")
             raise
+
+
+s3_client = AioHttpClientWithOpenSession()

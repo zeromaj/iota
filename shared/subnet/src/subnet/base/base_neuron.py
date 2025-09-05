@@ -82,6 +82,7 @@ class BaseNeuron:
             weights=old_weights,
             optimizer_state=old_optimizer_state,
             device=device,
+            layer=self.layer,
         )
         if new_weights is None or new_optimizer_state is None:
             logger.warning("No new weights or optimizer state downloaded")

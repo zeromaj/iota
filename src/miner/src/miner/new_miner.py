@@ -1,17 +1,19 @@
-import sys
 import asyncio
 from loguru import logger
 import json
+import sys
 import time
+from miner.utils.partition_merging import merge_partition_batch
+from miner.utils.partition_merging import get_partition_batch
+from miner.utils.partition_merging import download_batch_partitions
+from miner.utils.partition_merging import upload_partition_batch
 import torch
 import aiohttp
 from bittensor import Wallet
-
 from subnet.common_api_client import CommonAPIClient
 from miner.health_server import HealthServerMixin
 from miner.utils.activation_utils import download_sample
 from miner.utils.partition_merging import (
-    download_partition,
     filter_bad_metadata,
     get_weight_partition_info,
 )
@@ -19,12 +21,10 @@ from miner import settings as miner_settings
 from miner.state_manager import CacheEntry, StateManager
 from miner.utils.utils import (
     create_metadata,
-    extract_filename_from_url,
     upload_file,
     upload_tensor,
     wait_for_state,
 )
-
 from common import settings as common_settings
 from common.models.api_models import (
     ActivationResponse,
@@ -36,6 +36,7 @@ from common.models.api_models import (
     SubmittedWeightsAndOptimizerPresigned,
     WeightUpdate,
 )
+from common.models.miner_models import ChunkMetadata
 from common.utils.exceptions import (
     APIException,
     LayerStateException,
@@ -44,18 +45,17 @@ from common.utils.exceptions import (
     NanInfWarning,
     SpecVersionException,
     SubmittedWeightsError,
+    WeightPartitionException,
 )
-from common.models.miner_models import ChunkMetadata
 from common.utils.partitions import MinerPartition
 from common.utils.shared_states import LayerPhase
-
-from subnet.utils.s3_torch import download_tensor
-from subnet.utils.vector_utils import check_for_nans_and_infs, flatten_optimizer_state
-from subnet.utils.partition_utils import save_model_weights_and_optimizer_state, load_model_weights_and_optimizer_state
 from subnet.base.base_neuron import BaseNeuron
 from subnet.miner_api_client import MinerAPIClient
 from subnet.model.utils import _clean_gpu_memory, compute_loss
 from subnet.test_client import TestAPIClient
+from subnet.utils.partition_utils import load_model_weights_and_optimizer_state, save_model_weights_and_optimizer_state
+from subnet.utils.s3_torch import download_tensor
+from subnet.utils.vector_utils import check_for_nans_and_infs, flatten_optimizer_state
 
 
 class Miner(BaseNeuron, HealthServerMixin):
@@ -117,6 +117,7 @@ class Miner(BaseNeuron, HealthServerMixin):
                         if not partitions:
                             logger.info("🔄 Miner has no partitions to merge")
                             continue
+
                         logger.info("🔄 Miner starting merging partitions")
                         partitions = await self.merge_partitions(
                             weight_path_per_layer=weight_path_per_layer,
@@ -150,6 +151,12 @@ class Miner(BaseNeuron, HealthServerMixin):
                 continue
             except aiohttp.ClientResponseError as e:
                 logger.info(f"🔄 Miner {self.hotkey[:8]} Client response error: {e}")
+                continue
+            except SubmittedWeightsError as e:
+                logger.info(f"🔄 Miner {self.hotkey[:8]} Submitted weights error: {e}")
+                continue
+            except WeightPartitionException as e:
+                logger.info(f"🔄 Miner {self.hotkey[:8]} Partition exception: {e}")
                 continue
             except NanInfWarning as e:
                 logger.info(f"⚠️ Miner {self.hotkey[:8]} NaN/Inf warning: {e}")
@@ -213,16 +220,23 @@ class Miner(BaseNeuron, HealthServerMixin):
             input_activations = await download_sample(
                 download_url=activation.presigned_download_url, tokenizer=self.model_manager.tokenizer
             )
+            logger.debug(f"Got sample shape: {input_activations.shape}")
         else:
             # Download activation from S3
             input_activations = await download_tensor(
                 path=activation.presigned_download_url, device=miner_settings.DEVICE
             )
+            logger.debug(f"Got activation shape: {input_activations.shape}")
             if not common_settings.MOCK:
                 input_activations = input_activations.reshape(
-                    -1,
+                    common_settings.MINI_BATCH_SIZE,
                     common_settings.SEQUENCE_LENGTH,
                     self.model_manager.model_config.get("bottleneck_dim") or self.model_manager.model_config["emb_dim"],
+                )
+            else:
+                input_activations = input_activations.reshape(
+                    common_settings.MINI_BATCH_SIZE,
+                    100,
                 )
 
         # Perform the actual forward pass
@@ -292,10 +306,15 @@ class Miner(BaseNeuron, HealthServerMixin):
             )
             if not common_settings.MOCK:
                 activation_grads = activation_grads.reshape(
-                    -1,
+                    common_settings.MINI_BATCH_SIZE,
                     common_settings.SEQUENCE_LENGTH,
                     self.model_manager.model_config.get("bottleneck_dim")
                     or self.model_manager.model_config.get("emb_dim"),
+                )
+            else:
+                activation_grads = activation_grads.reshape(
+                    common_settings.MINI_BATCH_SIZE,
+                    100,
                 )
 
         # Get activations from cache and move back to GPU
@@ -351,6 +370,22 @@ class Miner(BaseNeuron, HealthServerMixin):
         )
         # Remove from cache
         self.state_manager.remove_from_cache(activation.activation_id)
+
+        # Check if we need to perform a local optimization step
+        if self.state_manager.increment_backward_count():
+            logger.info(
+                f"🔄 Miner {self.hotkey[:8]} performing local optimization step after {common_settings.MINI_BATCH_ACCUMULATION_COUNT} backward passes"
+            )
+            learning_rate = await self.miner_api_client.get_learning_rate()
+            await self.model_manager.local_optimization_step(learning_rate=learning_rate)
+            self.state_manager.reset_optimization_counter()
+            for activation_id in self.state_manager.cache:
+                self.state_manager.remove_from_cache(activation_id)
+            self.state_manager.local_optimization_steps += 1
+            logger.info(
+                f"✅ Miner {self.hotkey[:8]} completed local optimization step #{self.state_manager.local_optimization_steps}"
+            )
+
         logger.info(
             f"✅ Successfully completed BACKWARD pass for activation {activation.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
         )
@@ -480,8 +515,8 @@ class Miner(BaseNeuron, HealthServerMixin):
             logger.debug(f"Gradients: {[p.grad for p in self.model_manager.model.parameters()]}")
             return
 
-        learning_rate = await self.miner_api_client.get_learning_rate()
-        await self.model_manager.local_all_reduce(learning_rate=learning_rate)
+        # learning_rate = await self.miner_api_client.get_learning_rate()
+        # await self.model_manager.local_all_reduce(learning_rate=learning_rate)
 
         flattened_optimizer_state, _, _ = flatten_optimizer_state(
             optimizer=self.model_manager.optimizer, device=miner_settings.DEVICE
@@ -489,6 +524,8 @@ class Miner(BaseNeuron, HealthServerMixin):
         weights = torch.nn.utils.parameters_to_vector(parameters=self.model_manager.model.parameters())
 
         try:
+            self.model_manager.optimizer.zero_grad()
+            self.state_manager.reset_optimization_counter()
             num_splits = await self.miner_api_client.get_num_splits()
             self.state_manager.num_metadata_chunks = num_splits
             if not self.state_manager.num_metadata_chunks:
@@ -611,6 +648,9 @@ class Miner(BaseNeuron, HealthServerMixin):
 
         self.state_manager.reset()
 
+        # We provide the model config and metadata so that all miners are aligned.
+        model_config, model_metadata = await self.register_loop()
+
         # TODO: This wont work if we start moving miners across layers depending on the epoch.
         if self.model_manager.model is not None and self.model_manager.optimizer is not None:
             current_model_weights: torch.Tensor = torch.nn.utils.parameters_to_vector(
@@ -632,9 +672,6 @@ class Miner(BaseNeuron, HealthServerMixin):
         )
 
         self.model_manager.reset()
-
-        # We provide the model config and metadata so that all miners are aligned.
-        model_config, model_metadata = await self.register_loop()
 
         if not await self._setup_local_model(
             model_config=model_config,
@@ -668,113 +705,31 @@ class Miner(BaseNeuron, HealthServerMixin):
         Returns:
             list[Partition]: The merged partitions
         """
-        final_partitions: list[MinerPartition] = []
-
         filtered_metadata: dict[str, dict[int, dict[str, ChunkMetadata]]] = await filter_bad_metadata(
             partitions=partitions, submitted_weights_and_optimizers=weight_path_per_layer
         )
-        number_of_valid_partitions = self.state_manager.num_metadata_chunks
+        # Grab a batch of partitions to download the weights for
+        for batch in range(min(miner_settings.N_PARTITION_BATCHES, len(partitions))):
+            logger.debug(f"Merging batch {batch} of {min(miner_settings.N_PARTITION_BATCHES, len(partitions))}")
 
-        for partition in partitions:
-            if self.state_manager.num_metadata_chunks is not None:
-                if partition.chunk_number >= number_of_valid_partitions:
-                    logger.warning(
-                        f"Skipping partition {partition.chunk_number} because it is invalid as it doesn't exist in the metadata chunks"
-                    )
-                    continue
-            else:
-                logger.error(
-                    "Somehow, the number of metadata chunks is None, and it shouldn't be...Continuing without the check!"
-                )
+            batch_partitions = await get_partition_batch(batch_index=batch, partitions=partitions)
+            logger.debug(f"{len(batch_partitions)} batch partitions grabbed")
 
-            try:
-                logger.debug(f"Layer {self.state_manager.layer} | merging partition {partition.chunk_number}")
+            downloaded_partitions = await download_batch_partitions(batch_partitions, filtered_metadata)
+            logger.debug(f"{len(downloaded_partitions)} batch partitions downloaded successfully")
 
-                weight_average = None
-                optimizer_state_average = None
-                weight_counter = 0
-                optimizer_state_counter = 0
+            merge_results = await merge_partition_batch(
+                batch_partitions=batch_partitions,
+                downloaded_partitions=downloaded_partitions,
+                filtered_metadata=filtered_metadata,
+                num_metadata_chunks=self.state_manager.num_metadata_chunks,
+            )
+            logger.debug(f"{len(merge_results)} batch partitions merged")
 
-                results: list[tuple[torch.Tensor, torch.Tensor]] = await asyncio.gather(
-                    *[
-                        download_partition(
-                            weight_metadata=metadata[partition.chunk_number]["weights"],
-                            optimizer_metadata=metadata[partition.chunk_number]["optimizer_state"],
-                        )
-                        for _, metadata in filtered_metadata.items()
-                    ]
-                )
-                for metadata, (weights, optimizer_state) in zip(filtered_metadata.values(), results):
-                    try:
-                        if weights is None or optimizer_state is None:
-                            logger.warning(f"No weights or optimizer state downloaded. Partitions: {partitions}")
-                            raise Exception(f"No weights or optimizer state downloaded. Partitions: {partitions}")
+            final_partitions = await upload_partition_batch(
+                merge_results=merge_results, filtered_metadata=filtered_metadata, hotkey=self.wallet.hotkey
+            )
+            logger.debug(f"{len(final_partitions)} batch partitions uploaded")
 
-                        # TODO: We will be changing the way that weights and optimizer states are merged.
-                        weights_metadata: ChunkMetadata = metadata[partition.chunk_number]["weights"]
-                        optimizer_state_metadata: ChunkMetadata = metadata[partition.chunk_number]["optimizer_state"]
-
-                        if weight_average is None:
-                            weight_average = weights.to(torch.float32) * weights_metadata.weighting_factor
-                            optimizer_state_average = (
-                                optimizer_state.to(torch.float32) * optimizer_state_metadata.weighting_factor
-                            )
-
-                        else:
-                            # create a running sum of weights weighted by the weighting factor
-                            weight_average += weights.to(torch.float32) * weights_metadata.weighting_factor
-                            optimizer_state_average += (
-                                optimizer_state.to(torch.float32) * optimizer_state_metadata.weighting_factor
-                            )
-
-                        weight_counter += weights_metadata.weighting_factor
-                        optimizer_state_counter += optimizer_state_metadata.weighting_factor
-
-                    except Exception as e:
-                        logger.exception(f"Error downloading chunk {partition.chunk_number} from {metadata}: {e}")
-
-                if weight_average is None:
-                    raise Exception(f"No weights downloaded. Partitions: {partitions}")
-
-                # Average the weights
-                weight_average /= weight_counter
-                weight_average = weight_average.to(torch.bfloat16)
-                optimizer_state_average /= optimizer_state_counter
-                optimizer_state_average = optimizer_state_average.to(torch.bfloat16)
-
-                weight_upload_response: CompleteFileUploadResponse = await upload_tensor(
-                    tensor=weight_average.detach().cpu(),
-                    file_type="weights",
-                    hotkey=self.wallet.hotkey,
-                )
-
-                optimizer_state_upload_response: CompleteFileUploadResponse = await upload_tensor(
-                    tensor=optimizer_state_average.detach().cpu(),
-                    file_type="optimizer_state",
-                    hotkey=self.wallet.hotkey,
-                )
-
-                partition.weight_path = weight_upload_response.object_path
-                partition.optimizer_state_path = optimizer_state_upload_response.object_path
-                partition.weight_metadata_path = extract_filename_from_url(weights_metadata.metadata_path)
-                partition.optimizer_state_metadata_path = extract_filename_from_url(
-                    optimizer_state_metadata.metadata_path
-                )
-
-                final_partitions.append(partition)
-            except Exception as e:
-                logger.exception(f"Failed to get partition {partition.chunk_number}: {e}")
-
-        valid_partitions = []
-        for partition in final_partitions:
-            if partition.is_valid():
-                valid_partitions.append(partition)
-            else:
-                logger.warning(
-                    f"Skipping partition {partition.chunk_number} because it is invalid; partition: {partition}"
-                )
-
-        if not valid_partitions:
-            raise Exception("No valid partitions to submit")
-
-        await self.miner_api_client.submit_merged_partitions(merged_partitions=valid_partitions)
+            await self.miner_api_client.submit_merged_partitions(merged_partitions=final_partitions)
+            logger.debug(f"{len(final_partitions)} batch partitions submitted")
