@@ -34,8 +34,8 @@ def compute_loss(
 
     Args:
         mock (bool): Whether to use mock mode
-        logits (torch.Tensor): Model output logits
-        targets (torch.Tensor): Input labels
+        logits (torch.Tensor): Model output logits of shape (batch_size, seq_len, vocab_size)
+        targets (torch.Tensor): Input labels of shape (batch_size, seq_len)
         vocab_size (int): Vocabulary size
         pad_token_id (int): Padding token id
         pack (bool): Whether sample packing is used
@@ -46,6 +46,7 @@ def compute_loss(
     if mock:
         loss = logits.sum()
         return loss
+
     # Shift the logits and labels to compute the loss.
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = targets[..., 1:].contiguous()
@@ -63,7 +64,7 @@ def compute_loss(
         # CrossEntropyLoss ignores -100 labels by default.
         shift_labels[pad_mask] = -100
 
-        # Flatten the tokens
+    # Flatten the tokens
     loss_fct = torch.nn.CrossEntropyLoss()
     shift_logits = shift_logits.view(-1, vocab_size)
     shift_labels = shift_labels.view(-1)

@@ -1,16 +1,26 @@
+import asyncio
 import os
 
+from common import settings as common_settings
 from common.models.miner_models import ChunkMetadata
 from common.utils.exceptions import NanInfWarning
 from common.utils.partitions import MinerPartition, format_chunk_data
 from common.utils.s3_utils import download_file
+from common.utils.s3_utils import filter_exceptions
 import torch
 
 import json
 
 from loguru import logger
-from subnet.utils.s3_torch import download_tensor
 from subnet.utils.vector_utils import check_for_nans_and_infs
+from subnet.utils.s3_torch import download_tensor
+
+
+def get_cosine_similarity(old_shard: torch.Tensor, new_shard: torch.Tensor) -> float:
+    norm_old = torch.norm(old_shard)
+    norm_new = torch.norm(new_shard)
+    cosine_similarity_weights = torch.cosine_similarity(norm_old, norm_new, dim=0)
+    return cosine_similarity_weights
 
 
 async def build_chunk_data(partition: MinerPartition) -> MinerPartition:
@@ -68,35 +78,32 @@ async def download_partitions(
     weights: torch.Tensor,
     optimizer_state: torch.Tensor,
     device: str,
+    layer: int = None,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Downloads the weights for a given layer and device.
-
-    Miners/validators have to download the shards of the final merged layer weights. These weights exist across multiple files and are 1D byte strings
+    """Downloads the weights and optimizer state for a given list of partitions.
 
     Args:
-        layer_idx (int): The layer index to download weights for
-        device (str): The device to download weights for
-        parser (Callable, optional): A parser function to parse the response from the API. Defaults to None.
-        epoch (int, optional): The epoch to download weights for. Defaults to None.
+        merged_partitions (list[MinerPartition]): The merged partitions to download weights and optimizer state for
+        weights (torch.Tensor): The current weights to download weights and optimizer state for
+        optimizer_state (torch.Tensor): The current optimizer state to download weights and optimizer state for
+            It will be flattened and then downloaded as a single tensor.
+        device (str): The device to download weights and optimizer state for
 
     Returns:
         tuple[torch.Tensor, torch.Tensor] | None: The weights and optimizer state for the layer
     """
     partition_download_error_counter: int = 0
+    total_parts: int = len(merged_partitions) if merged_partitions else 0
+
+    if not merged_partitions:
+        logger.warning("No merged partitions found❗️")
+        return None, None
 
     try:
-        total_parts = len(merged_partitions) if merged_partitions else 0
+        # Check for nans and infs in the weights
+        check_for_nans_and_infs(weights, "current weights", exception_type=NanInfWarning)
 
-        if not merged_partitions:
-            logger.warning("No merged partitions found❗️")
-            return None, None
-
-        logger.info(f"Preparing to download {total_parts} merged partitions")
-
-        # Allocate memory to the full 1d tensor, clone to avoid modifying the original weights in place.
-
-        check_for_nans_and_infs(weights, "current weights for miner", exception_type=NanInfWarning)
-
+        # Check for nans and infs in the optimizer state
         check_for_nans_and_infs(
             optimizer_state,
             "current optimizer state for miner",
@@ -106,58 +113,117 @@ async def download_partitions(
         num_weights = weights.numel()
         num_optimizer_state = optimizer_state.numel()
 
-        total_weights_downloaded = 0
-        total_optimizer_state_downloaded = 0
+        total_weights_downloaded: int = 0
+        total_optimizer_state_downloaded: int = 0
 
-        for idx, partition in enumerate(merged_partitions):
-            logger.info(f"Downloading merged partition {idx + 1}/{total_parts} (chunk {partition.chunk_number})")
+        # Build all partition data first
+        new_partitions: list[MinerPartition] = []
+        for partition in merged_partitions:
             new_partition: MinerPartition = await build_chunk_data(partition=partition)
+            new_partitions.append(new_partition)
+
+        # Process partitions in batches of DOWNLOAD_BATCH_SIZE
+        logger.info(
+            f"Starting batched download of {len(new_partitions)} weight/optimizer pairs in batches of {common_settings.DOWNLOAD_BATCH_SIZE}"
+        )
+
+        # Batch the downloads (same number for weights and optimizer state, so it's technically 2 * DOWNLOAD_BATCH_SIZE)
+        for batch_start in range(0, len(new_partitions), common_settings.DOWNLOAD_BATCH_SIZE):
+            batch_end = min(batch_start + common_settings.DOWNLOAD_BATCH_SIZE, len(new_partitions))
+            batch_partitions = new_partitions[batch_start:batch_end]
+
+            logger.info(
+                f"Processing batch {batch_start//common_settings.DOWNLOAD_BATCH_SIZE + 1}/{(len(new_partitions) + common_settings.DOWNLOAD_BATCH_SIZE - 1)//common_settings.DOWNLOAD_BATCH_SIZE}: partitions {batch_start} to {batch_end-1}"
+            )
 
             try:
-                weight_shard = await download_tensor(
-                    path=new_partition.weight_path,
-                    device=device,
+                downloaded_tensors_weights = await asyncio.gather(
+                    *[
+                        download_tensor(partition.weight_path, device="cpu", dtype=torch.bfloat16)
+                        for partition in batch_partitions
+                    ],
+                    return_exceptions=True,
+                )
+                downloaded_tensors_optimizer_state = await asyncio.gather(
+                    *[
+                        download_tensor(partition.optimizer_state_path, device="cpu", dtype=torch.bfloat16)
+                        for partition in batch_partitions
+                    ],
+                    return_exceptions=True,
+                )
+                downloaded_tensors_weights, downloaded_tensors_optimizer_state = filter_exceptions(
+                    downloaded_tensors_weights, downloaded_tensors_optimizer_state
                 )
 
-                shard_optimizer_state = await download_tensor(
-                    path=new_partition.optimizer_state_path,
-                    device=device,
-                )
+                # Process downloaded tensors and apply to model
+                # Tensors come in pairs: [weight0, opt0, weight1, opt1, ...]
+                for weight_shard, optimizer_state_shard, partition in zip(
+                    downloaded_tensors_weights, downloaded_tensors_optimizer_state, batch_partitions
+                ):
+                    # If either of the downloads fail, we want to discard the shards.
+                    if isinstance(weight_shard, Exception) or isinstance(optimizer_state_shard, Exception):
+                        partition_download_error_counter += 1
+                        continue
 
-                weight_state_start_idx = new_partition.weight_data.chunk_start_idx
-                weight_state_end_idx = new_partition.weight_data.chunk_end_idx
-                optimizer_state_start_idx = new_partition.optimizer_state_data.chunk_start_idx
-                optimizer_state_end_idx = new_partition.optimizer_state_data.chunk_end_idx
+                    weight_state_start_idx = partition.weight_data.chunk_start_idx
+                    weight_state_end_idx = partition.weight_data.chunk_end_idx
+                    optimizer_state_start_idx = partition.optimizer_state_data.chunk_start_idx
+                    optimizer_state_end_idx = partition.optimizer_state_data.chunk_end_idx
 
-                logger.debug(
-                    f"Weight shard shape: {weight_shard.shape}, expected start idx: {weight_state_start_idx}, expected end idx: {weight_state_end_idx}, range: {weight_state_end_idx-weight_state_start_idx}"
-                )
-                weights[weight_state_start_idx:weight_state_end_idx] = weight_shard
+                    try:
+                        cosine_similarity_weight_shard = get_cosine_similarity(
+                            old_shard=weights[weight_state_start_idx:weight_state_end_idx].clone().to(device),
+                            new_shard=weight_shard,
+                        )
+                        cosine_similarity_optimizer_shard = get_cosine_similarity(
+                            old_shard=optimizer_state[optimizer_state_start_idx:optimizer_state_end_idx]
+                            .clone()
+                            .to(device),
+                            new_shard=optimizer_state_shard,
+                        )
 
-                logger.debug(
-                    f"Shard optimizer state shape: {shard_optimizer_state.shape}, expected start idx: {optimizer_state_start_idx}, expected end idx: {optimizer_state_end_idx}, range: {optimizer_state_end_idx-optimizer_state_start_idx}"
-                )
-                optimizer_state[optimizer_state_start_idx:optimizer_state_end_idx] = shard_optimizer_state
+                        logger.debug(
+                            f"Cosine similarities for partition chunk {partition.chunk_number} for layer {layer} for weight shard: {cosine_similarity_weight_shard:.4f} optimizer shard: {cosine_similarity_optimizer_shard:.4f}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Error calculating cosine similarity for partition chunk {partition.chunk_number} for layer {layer} for shard: {e}"
+                        )
 
-                total_weights_downloaded += weight_shard.numel()
-                total_optimizer_state_downloaded += shard_optimizer_state.numel()
+                    logger.debug(
+                        f"Weight shard shape: {weight_shard.shape}, expected start idx: {weight_state_start_idx}, expected end idx: {weight_state_end_idx}, range: {weight_state_end_idx-weight_state_start_idx}"
+                    )
+                    weights[weight_state_start_idx:weight_state_end_idx] = weight_shard
 
-                logger.debug(
-                    f"Applied partition {partition.chunk_number}: weights[{weight_state_start_idx}:{weight_state_end_idx}] optimizer[{optimizer_state_start_idx}:{optimizer_state_end_idx}]"
-                )
+                    logger.debug(
+                        f"Shard optimizer state shape: {optimizer_state_shard.shape}, expected start idx: {optimizer_state_start_idx}, expected end idx: {optimizer_state_end_idx}, range: {optimizer_state_end_idx-optimizer_state_start_idx}"
+                    )
+                    optimizer_state[optimizer_state_start_idx:optimizer_state_end_idx] = optimizer_state_shard
+
+                    total_weights_downloaded += weight_shard.numel()
+                    total_optimizer_state_downloaded += optimizer_state_shard.numel()
+
+                    logger.debug(
+                        f"Applied partition {partition.chunk_number}: weights[{weight_state_start_idx}:{weight_state_end_idx}] optimizer[{optimizer_state_start_idx}:{optimizer_state_end_idx}]"
+                    )
 
             except Exception as e:
-                logger.warning(f"Error downloading partition {partition}: {e}")
-                partition_download_error_counter += 1
+                logger.warning(
+                    f"Error in batched download for batch {batch_start//common_settings.DOWNLOAD_BATCH_SIZE + 1}: {e}"
+                )
+                partition_download_error_counter += common_settings.DOWNLOAD_BATCH_SIZE
+                continue
 
         logger.debug(
-            f"Downloaded {total_parts - partition_download_error_counter} / {total_parts} partitions inside download_and_set_weights_and_optimizer_state for hotkey"
+            f"Downloaded {total_parts - partition_download_error_counter} / {total_parts} partitions inside download_and_set_weights_and_optimizer_state"
         )
         logger.info(
             f"download_and_set_weights_and_optimizer_state downloaded {total_weights_downloaded} / {num_weights} ({(total_weights_downloaded/num_weights)*100}%) weights and {total_optimizer_state_downloaded} / {num_optimizer_state} ({(total_optimizer_state_downloaded/num_optimizer_state)*100}%) optimizer state"
         )
 
-        logger.success("✅ Successfully downloaded and applied weights and optimizer state to model")
+        # Cast the model weights and optimizer state to the correct device.
+        weights: torch.Tensor = weights.to(device)
+        optimizer_state: torch.Tensor = optimizer_state.to(device)
         return weights, optimizer_state
 
     except Exception:

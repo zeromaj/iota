@@ -1,16 +1,13 @@
 import math
-from loguru import logger
-import torch
 
-from common.utils.exceptions import NanInfException
-from subnet.model.utils import _clean_gpu_memory
+import torch
 from common import settings as common_settings
+from common.utils.exceptions import NanInfException
+from loguru import logger
 from subnet.model.loaders import load_model_split
-from subnet.utils.vector_utils import (
-    add_artificial_gradients,
-    check_for_nans_and_infs,
-)
 from subnet.model.tokenizer import load_tokenizer
+from subnet.model.utils import _clean_gpu_memory
+from subnet.utils.vector_utils import add_artificial_gradients, check_for_nans_and_infs
 
 
 class MockModel(torch.nn.Module):
@@ -265,40 +262,26 @@ class ModelManager:
         self.eos_token_id = self.tokenizer.eos_token_id
         logger.info(f"loaded vocab info: vocab size | {self.vocab_size} | EOS token id | {self.eos_token_id}")
 
-    async def local_all_reduce(self, learning_rate: float):
-        """local all reduce is for local testing purposes. It's not used in the production code.
+    async def local_optimization_step(self, learning_rate: float):
+        """Perform a local optimization step every 32 backward passes."""
+        logger.info(f"{self.logger_attributes['hotkey'][:8]} is beginning local optimization step")
 
-        Args:
-            layer (int): the layer to all reduce
-        """
-        logger.info(f"{self.logger_attributes['hotkey'][:8]} is beginning local all reduce {self.optimizer_step_count}")
-        self.optimizer_step_count += 1
-
-        # Check gradients for nans and infs
-        # Flatten gradients into a 1D tensor
-        flat_params = torch.nn.utils.parameters_to_vector(self.model.parameters())
-
-        check_for_nans_and_infs(
-            flat_params,
-            f"model parameters of len({len(flat_params)}) for miner {self.logger_attributes['hotkey'][:8]} before clipping",
-            exception_type=NanInfException,
-        )
         # Clip the gradients
         await self.clip_gradients()
 
-        # flat_gradients = torch.nn.utils.parameters_to_vector([p.grad for p in self.model.parameters()])
-        flat_params = torch.nn.utils.parameters_to_vector(self.model.parameters())
-
-        # request the learning rate from the orchestrator
+        # Step the optimizer
+        if learning_rate is None:
+            logger.error("Learning rate is None")
+            learning_rate = common_settings.LEARNING_RATE
+        logger.debug(f"Setting learning rate to {learning_rate}")
         self.optimizer.param_groups[0]["lr"] = learning_rate
         logger.debug(f"Stepping optimizer for miner {self.logger_attributes['hotkey'][:8]}")
         self.optimizer.step()
 
-        # self.lr_scheduler.step()
-        logger.info(f"{self.logger_attributes['hotkey'][:8]} learning rate: {self.optimizer.param_groups[0]['lr']}")
-
         # Zero the gradients
         self.optimizer.zero_grad()
+
+        logger.info(f"{self.logger_attributes['hotkey'][:8]} completed local optimization step")
 
     def reset(self):
         """Needs to reset all the attributes of the class"""

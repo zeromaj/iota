@@ -1,5 +1,6 @@
 import asyncio
 import math
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -137,3 +138,15 @@ async def download_file(presigned_url: str, max_retries: int = 3):
         except Exception as e:
             logger.error(f"Error downloading file from presigned URL: {e}")
             raise
+
+
+def filter_exceptions(*args) -> list[Any]:
+    bad_indices = []
+    for arg in args:
+        for i, element in enumerate(arg):
+            if isinstance(element, Exception):
+                bad_indices.append(i)
+    result = tuple([[e for i, e in enumerate(arg) if i not in bad_indices] for arg in args])
+    if len(result) == 1:
+        return result[0]
+    return result

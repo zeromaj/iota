@@ -1,10 +1,10 @@
 import time
-import torch
-from loguru import logger
-from bittensor import Wallet
-from pydantic import BaseModel
 
+import torch
+from bittensor import Wallet
 from common import settings as common_settings
+from loguru import logger
+from pydantic import BaseModel
 from subnet.miner_api_client import MinerAPIClient
 
 
@@ -26,6 +26,8 @@ class StateManager(BaseModel):
     training_epoch_when_registered: int = None
     num_metadata_chunks: int | None = None
     run_id: str = None
+    backwards_since_last_optim: int = 0
+    local_optimization_steps: int = 0
 
     class Config:
         arbitrary_types_allowed = True
@@ -79,6 +81,15 @@ class StateManager(BaseModel):
         for activation_id in activations_to_remove:
             self.remove_from_cache(activation_id)
 
+    def increment_backward_count(self):
+        """Increment the backward pass counter and return True if optimization step is needed."""
+        self.backwards_since_last_optim += 1
+        return self.backwards_since_last_optim >= common_settings.MINI_BATCH_ACCUMULATION_COUNT
+
+    def reset_optimization_counter(self):
+        """Reset the backward pass counter after performing optimization step."""
+        self.backwards_since_last_optim = 0
+
     def reset(self):
         # Clear the cache
         self.cache.clear()
@@ -87,3 +98,4 @@ class StateManager(BaseModel):
         # Reset the states
         self.backwards_since_reset = 0
         self.training_epoch_when_registered = None
+        self.local_optimization_steps = 0
