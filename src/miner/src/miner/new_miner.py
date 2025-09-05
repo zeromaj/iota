@@ -266,6 +266,9 @@ class Miner(BaseNeuron, HealthServerMixin):
             return await self.backward(activation=activation)
 
         # If we are not on the last layer, we just need to upload the activations
+        logger.info(
+            f"output activations before upload with shape {output_activations.shape} for {self.hotkey[:8]} on layer {self.state_manager.layer}"
+        )
         upload_response: CompleteFileUploadResponse = await upload_tensor(
             tensor=output_activations.detach().clone(),
             hotkey=self.wallet.hotkey,
@@ -326,6 +329,9 @@ class Miner(BaseNeuron, HealthServerMixin):
 
         state = cached_activations.state
 
+        logger.info(
+            f"output activations before backward with shape {output_activations.shape} for {self.hotkey[:8]} on layer {self.state_manager.layer}"
+        )
         await self.model_manager._backward(
             layer=self.state_manager.layer,
             output_activations=output_activations,
@@ -343,12 +349,15 @@ class Miner(BaseNeuron, HealthServerMixin):
             # Get the embedding layer weight grads instead of the input activations grads
             # This is because input activation grads of the first layer do not exist.
             emb_weight = self.model_manager.model.tok_emb.weight
-            grad_size = (
+            embedding_dim = (
                 self.model_manager.model_config["bottleneck_dim"]
                 if self.model_manager.model_config["bottleneck_dim"] is not None
                 else self.model_manager.model_config["emb_dim"]
             )
-            input_activation_grads = emb_weight.grad[: common_settings.SEQUENCE_LENGTH, :grad_size]
+            grad_flattened = emb_weight.grad.clone().flatten()
+            input_activation_grads = grad_flattened[
+                : common_settings.SEQUENCE_LENGTH * embedding_dim * common_settings.MINI_BATCH_SIZE
+            ]
 
             # Detach and convert to bfloat16 to ensure we only save the values
             input_activation_grads = input_activation_grads.detach().to(torch.bfloat16).cpu()
@@ -361,6 +370,9 @@ class Miner(BaseNeuron, HealthServerMixin):
             hotkey=self.wallet.hotkey,
         )
 
+        logger.info(
+            f"input activation grads before upload with shape {input_activation_grads.shape} for {self.hotkey[:8]} on layer {self.state_manager.layer}"
+        )
         response = await self.miner_api_client.submit_activation_request(
             submit_activation_request=SubmitActivationRequest(
                 activation_id=activation.activation_id,

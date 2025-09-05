@@ -130,7 +130,10 @@ class ModelManager:
         if layer > 0:
             input_activations.requires_grad_(True)
         self.model.to(self.device)
-        output_activations = self.model(input_activations.to(self.device))
+        output_activations: tuple[torch.Tensor, dict] = self.model(input_activations.to(self.device))
+        logger.info(
+            f"output activations with shape {output_activations[0].shape} for {self.logger_attributes['hotkey'][:8]} on layer {layer}"
+        )
         return output_activations
 
     async def _backward(
