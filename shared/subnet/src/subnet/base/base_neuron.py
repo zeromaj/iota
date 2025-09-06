@@ -4,6 +4,8 @@ from typing import Optional
 import bittensor as bt
 from subnet.utils.partition_utils import download_partitions
 import torch
+
+from common.models.error_models import BaseErrorModel
 from common.models.miner_models import MinerStatus
 from common.utils.partitions import MinerPartition
 from common.utils.shared_states import LayerPhase
@@ -74,7 +76,15 @@ class BaseNeuron:
         )
 
         # Get merged partitions from db
-        merged_partitions: list[MinerPartition] = await CommonAPIClient.get_merged_partitions(hotkey=self.wallet.hotkey)
+        # TODO: This is very ugly, and we should fix it... Moving on.
+        merged_partitions: list[MinerPartition] | BaseErrorModel = await CommonAPIClient.get_merged_partitions(
+            hotkey=self.wallet.hotkey
+        )
+        if isinstance(merged_partitions, BaseErrorModel):
+            logger.error(
+                f"Error getting merged partitions {merged_partitions.error_name}: {merged_partitions.error_dict}"
+            )
+            return
 
         # Download new weights and optimizer state
         new_weights, new_optimizer_state = await download_partitions(
