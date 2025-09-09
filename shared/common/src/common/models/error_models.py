@@ -18,8 +18,8 @@ class LayerStateError(BaseModel):
         return self
 
 
-class MinerNotRegisteredError(BaseModel):
-    message: str = "Miner not registered"
+class EntityNotRegisteredError(BaseModel):
+    message: str = "Entity not registered"
     name: Optional[str] = None
 
 

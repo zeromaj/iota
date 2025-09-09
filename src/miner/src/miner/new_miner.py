@@ -3,6 +3,7 @@ from loguru import logger
 import json
 import sys
 import time
+
 from miner.utils.partition_merging import merge_partition_batch
 from miner.utils.partition_merging import get_partition_batch
 from miner.utils.partition_merging import download_batch_partitions
@@ -391,8 +392,10 @@ class Miner(BaseNeuron, HealthServerMixin):
             learning_rate = await self.miner_api_client.get_learning_rate()
             await self.model_manager.local_optimization_step(learning_rate=learning_rate)
             self.state_manager.reset_optimization_counter()
-            for activation_id in self.state_manager.cache:
-                self.state_manager.remove_from_cache(activation_id)
+
+            # Remove all activations from cache
+            self.state_manager.cache.clear()
+
             self.state_manager.local_optimization_steps += 1
             logger.info(
                 f"✅ Miner {self.hotkey[:8]} completed local optimization step #{self.state_manager.local_optimization_steps}"
@@ -522,10 +525,12 @@ class Miner(BaseNeuron, HealthServerMixin):
         if self.state_manager.backwards_since_reset == 0:
             logger.warning(f"Backwards since reset for miner {self.hotkey[:8]} is 0, skipping")
             return
-        if all([p.grad is None for p in self.model_manager.model.parameters()]):
-            logger.warning(f"Gradients are None for miner {self.hotkey[:8]}, skipping")
-            logger.debug(f"Gradients: {[p.grad for p in self.model_manager.model.parameters()]}")
-            return
+
+        # DEPRECATED: This is no longer needed as we don't use gradients for weight submission
+        # if all([p.grad is None for p in self.model_manager.model.parameters()]):
+        #     logger.warning(f"Gradients are None for miner {self.hotkey[:8]}, skipping")
+        #     logger.debug(f"Gradients: {[p.grad for p in self.model_manager.model.parameters()]}")
+        #     return
 
         # learning_rate = await self.miner_api_client.get_learning_rate()
         # await self.model_manager.local_all_reduce(learning_rate=learning_rate)

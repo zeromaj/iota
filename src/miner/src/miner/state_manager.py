@@ -81,7 +81,7 @@ class StateManager(BaseModel):
         for activation_id in activations_to_remove:
             self.remove_from_cache(activation_id)
 
-    def increment_backward_count(self):
+    def increment_backward_count(self) -> bool:
         """Increment the backward pass counter and return True if optimization step is needed."""
         self.backwards_since_last_optim += 1
         return self.backwards_since_last_optim >= common_settings.MINI_BATCH_ACCUMULATION_COUNT
