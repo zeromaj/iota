@@ -13,7 +13,7 @@ from common.models.api_models import (
     SyncActivationAssignmentsRequest,
     WeightUpdate,
 )
-from common.models.error_models import BaseErrorModel, LayerStateError, MinerNotRegisteredError, SpecVersionError
+from common.models.error_models import BaseErrorModel, LayerStateError, EntityNotRegisteredError, SpecVersionError
 from common.utils.exceptions import LayerStateException, MinerNotRegisteredException, SpecVersionException
 from common.utils.partitions import MinerPartition
 from common.utils.s3_utils import upload_parts
@@ -235,7 +235,7 @@ class MinerAPIClient:
                 raise LayerStateException(
                     f"Miner is moving state from {error_dict.expected_status} to {error_dict.actual_status}"
                 )
-            if error_name == MinerNotRegisteredError.__name__:
+            if error_name == EntityNotRegisteredError.__name__:
                 logger.error(f"Miner not registered error: {response['error_dict']}")
                 raise MinerNotRegisteredException("Miner not registered")
             if error_name == SpecVersionError.__name__:
