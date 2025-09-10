@@ -1,5 +1,6 @@
 from typing import Any
 from common.models.api_models import (
+    RunInfo,
     ActivationResponse,
     CompleteFileUploadResponse,
     FileUploadCompletionRequest,
@@ -8,6 +9,7 @@ from common.models.api_models import (
     GetTargetsRequest,
     LossReportRequest,
     MinerRegistrationResponse,
+    RegisterMinerRequest,
     SubmitActivationRequest,
     SubmittedWeightsAndOptimizerPresigned,
     SyncActivationAssignmentsRequest,
@@ -23,48 +25,37 @@ from subnet.common_api_client import CommonAPIClient
 from substrateinterface.keypair import Keypair
 
 
-def catch_errors(func):
-    def wrapper(self, *args, **kwargs):
-        try:
-            return func(self, *args, **kwargs)
-        except LayerStateException as e:
-            logger.success(f"Layer state change: {e.message}")
-        except MinerNotRegisteredException as e:
-            logger.warning(f"Miner not registered: {e.message}")
-        except SpecVersionException as e:
-            logger.error(f"Spec version mismatch: {e.message}")
-        except Exception as e:
-            logger.exception(f"Error in {func.__name__}: {e}")
-            raise
-
-    return wrapper
-
-
-class MinerAPIClient:
+class MinerAPIClient(CommonAPIClient):
     def __init__(self, hotkey: Keypair | None = None):
         self.hotkey = hotkey
         self.layer_state = LayerPhase.TRAINING
 
-    @catch_errors
     async def get_targets(self, get_targets_request: GetTargetsRequest) -> str | BaseErrorModel:
         response = await CommonAPIClient.orchestrator_request(
             method="POST", path="/miner/get_targets", hotkey=self.hotkey, body=get_targets_request.model_dump()
         )
         return self.parse_response(response)
 
-    @catch_errors
-    async def register_miner_request(self) -> MinerRegistrationResponse | dict:
+    async def fetch_run_info_request(self) -> list[RunInfo]:
+        response = await CommonAPIClient.orchestrator_request(
+            method="GET", path="/common/get_run_info", hotkey=self.hotkey
+        )
+        parsed_response = self.parse_response(response)
+        return [RunInfo.model_validate(run_info) for run_info in parsed_response]
+
+    async def register_miner_request(
+        self, register_miner_request: RegisterMinerRequest
+    ) -> MinerRegistrationResponse | dict:
         try:
             response = await CommonAPIClient.orchestrator_request(
-                method="POST", path="/miner/register", hotkey=self.hotkey
+                method="POST", path="/miner/register", hotkey=self.hotkey, body=register_miner_request.model_dump()
             )
             parsed_response = self.parse_response(response)
-            return MinerRegistrationResponse(**parsed_response)
+            return MinerRegistrationResponse.model_validate(parsed_response)
         except Exception as e:
             logger.error(f"Error registering miner: {e}")
             raise
 
-    @catch_errors
     async def get_layer_state_request(self) -> LayerPhase | dict:
         try:
             response = await CommonAPIClient.orchestrator_request(
@@ -76,19 +67,17 @@ class MinerAPIClient:
             logger.error(f"Error getting layer state: {e}")
             raise
 
-    @catch_errors
     async def get_activation(self) -> ActivationResponse | dict:
         try:
             response = await CommonAPIClient.orchestrator_request(
                 method="GET", path="/miner/get_activation", hotkey=self.hotkey
             )
             parsed_response = self.parse_response(response)
-            return ActivationResponse(**parsed_response)
+            return ActivationResponse.model_validate(parsed_response)
         except Exception as e:
             logger.error(f"Error getting activation: {e}")
             raise
 
-    @catch_errors
     async def submit_weights(
         self,
         weight_update: WeightUpdate,
@@ -106,8 +95,7 @@ class MinerAPIClient:
             logger.error(f"Error submitting weights: {e}")
             raise
 
-    @catch_errors
-    async def report_loss(self, loss_report: LossReportRequest):
+    async def report_loss(self, loss_report: LossReportRequest) -> None:
         """Report loss to orchestrator"""
         try:
             response = await CommonAPIClient.orchestrator_request(
@@ -116,15 +104,12 @@ class MinerAPIClient:
                 hotkey=self.hotkey,
                 body=loss_report.model_dump(),
             )
-            return self.parse_response(response)
+            self.parse_response(response)
         except Exception as e:
             logger.exception(f"Error reporting loss: {e}")
             raise e
 
-    @catch_errors
-    async def submit_activation_request(
-        self, submit_activation_request: SubmitActivationRequest
-    ) -> ActivationResponse | dict:
+    async def submit_activation_request(self, submit_activation_request: SubmitActivationRequest) -> None:
         try:
             response = await CommonAPIClient.orchestrator_request(
                 method="POST",
@@ -132,12 +117,11 @@ class MinerAPIClient:
                 hotkey=self.hotkey,
                 body=submit_activation_request.model_dump(),
             )
-            return self.parse_response(response)
+            self.parse_response(response)
         except Exception as e:
             logger.error(f"Error submitting activation: {e}")
             raise
 
-    @catch_errors
     async def sync_activation_assignments(self, activation_ids: list[str]) -> dict[str, bool]:
         try:
             response = await CommonAPIClient.orchestrator_request(
@@ -151,7 +135,6 @@ class MinerAPIClient:
             logger.error(f"Error checking if activation is active: {e}")
             raise
 
-    @catch_errors
     async def get_partitions(self) -> list[int] | dict:
         """Get the partition indices for a given hotkey."""
         try:
@@ -166,24 +149,22 @@ class MinerAPIClient:
             logger.error(f"Error getting weight partition info: {e}")
             raise
 
-    @catch_errors
     async def get_weight_path_per_layer(self) -> list[SubmittedWeightsAndOptimizerPresigned] | dict:
         """Get the weight path for a given layer."""
         try:
-            response: list[SubmittedWeightsAndOptimizerPresigned] | dict = await CommonAPIClient.orchestrator_request(
+            response = await CommonAPIClient.orchestrator_request(
                 method="GET",
                 path="/miner/get_weight_path_per_layer",
                 hotkey=self.hotkey,
             )
             parsed_response = self.parse_response(response)
-            parsed_response = [SubmittedWeightsAndOptimizerPresigned(**weight) for weight in parsed_response]
-            return parsed_response
+            paths = [SubmittedWeightsAndOptimizerPresigned.model_validate(weight) for weight in parsed_response]
+            return paths
 
         except Exception as e:
             logger.error(f"Error getting weight path per layer: {e}")
             raise
 
-    @catch_errors
     async def get_num_splits(self) -> int | dict:
         """Get the number of splits for a given hotkey."""
         try:
@@ -197,7 +178,6 @@ class MinerAPIClient:
             logger.error(f"Error getting number of splits: {e}")
             raise
 
-    @catch_errors
     async def get_learning_rate(self) -> float | dict:
         """Get the current learning rate."""
         try:
@@ -209,7 +189,6 @@ class MinerAPIClient:
             logger.error(f"Error getting learning rate: {e}")
             raise
 
-    @catch_errors
     async def submit_merged_partitions(self, merged_partitions: list[MinerPartition]) -> dict:
         """Submit merged partitions to the orchestrator."""
         try:
@@ -222,6 +201,58 @@ class MinerAPIClient:
             return self.parse_response(response)
         except Exception as e:
             logger.error(f"Error submitting merged partitions: {e}")
+            raise
+
+    async def initiate_file_upload_request(
+        self,
+        hotkey: Keypair,
+        file_upload_request: FileUploadRequest,
+    ) -> FileUploadResponse | dict:
+        try:
+            response = await CommonAPIClient.orchestrator_request(
+                method="POST",
+                path="/miner/initiate_file_upload",
+                hotkey=hotkey,
+                body=file_upload_request.model_dump(),
+            )
+            parsed_response = self.parse_response(response)
+            return FileUploadResponse.model_validate(parsed_response)
+        except Exception as e:
+            logger.error(f"Error initiating file upload: {e}")
+            raise
+
+    @classmethod
+    async def upload_multipart_to_s3(cls, urls: list[str], data: bytes, upload_id: str) -> list[dict]:
+        parts = await upload_parts(urls=urls, data=data, upload_id=upload_id)
+        return parts
+
+    async def complete_file_upload_request(
+        self,
+        hotkey: Keypair,
+        file_upload_completion_request: FileUploadCompletionRequest,
+    ) -> CompleteFileUploadResponse | dict:
+        try:
+            response = await CommonAPIClient.orchestrator_request(
+                method="POST",
+                path="/miner/complete_multipart_upload",
+                hotkey=hotkey,
+                body=file_upload_completion_request.model_dump(),
+            )
+            parsed_response = self.parse_response(response)
+            return CompleteFileUploadResponse.model_validate(parsed_response)
+        except Exception as e:
+            logger.error(f"Error completing file upload: {e}")
+            raise
+
+    async def get_merged_partitions(self, hotkey: Keypair) -> list[MinerPartition] | dict:
+        try:
+            response = await CommonAPIClient.orchestrator_request(
+                method="GET", path="/common/get_merged_partitions", hotkey=hotkey
+            )
+            parsed_response = self.parse_response(response)
+            return [MinerPartition.model_validate(partition) for partition in parsed_response]
+        except Exception as e:
+            logger.error(f"Error getting merged partitions: {e}")
             raise
 
     def parse_response(self, response: Any) -> Any:
@@ -248,46 +279,3 @@ class MinerAPIClient:
                 raise Exception(f"Unexpected error from orchestrator. Response: {response}")
         else:
             return response
-
-
-class MinerS3Client:
-    @classmethod
-    async def initiate_file_upload_request(
-        cls,
-        hotkey: Keypair,
-        file_upload_request: FileUploadRequest,
-    ) -> FileUploadResponse | dict:
-        try:
-            response = await CommonAPIClient.orchestrator_request(
-                method="POST",
-                path="/miner/initiate_file_upload",
-                hotkey=hotkey,
-                body=file_upload_request.model_dump(),
-            )
-            return FileUploadResponse(**response)
-        except Exception as e:
-            logger.error(f"Error initiating file upload: {e}")
-            raise
-
-    @classmethod
-    async def upload_multipart_to_s3(cls, urls: list[str], data: bytes, upload_id: str) -> list[dict]:
-        parts = await upload_parts(urls=urls, data=data, upload_id=upload_id)
-        return parts
-
-    @classmethod
-    async def complete_file_upload_request(
-        cls,
-        hotkey: Keypair,
-        file_upload_completion_request: FileUploadCompletionRequest,
-    ) -> CompleteFileUploadResponse | dict:
-        try:
-            response = await CommonAPIClient.orchestrator_request(
-                method="POST",
-                path="/miner/complete_multipart_upload",
-                hotkey=hotkey,
-                body=file_upload_completion_request.model_dump(),
-            )
-            return CompleteFileUploadResponse(**response)
-        except Exception as e:
-            logger.error(f"Error completing file upload: {e}")
-            raise

@@ -13,7 +13,3 @@ class BaseValidator(ABC):
     @abstractmethod
     async def reset_validator(self) -> ValidationTaskResponse:
         raise NotImplementedError
-
-    @abstractmethod
-    async def set_burn_factor(self, burn_factor: float) -> ValidationTaskResponse:
-        raise NotImplementedError

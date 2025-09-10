@@ -20,7 +20,7 @@ from common.models.api_models import (
 )
 from common.utils.s3_utils import download_file
 from loguru import logger
-from subnet.miner_api_client import MinerAPIClient, MinerS3Client
+from subnet.miner_api_client import MinerAPIClient
 
 
 async def create_metadata(weights_tensor: torch.Tensor, num_sections: int) -> dict:
@@ -91,6 +91,7 @@ async def download_metadata(metadata_path: str) -> dict:
 
 
 async def upload_file(
+    miner_api_client: MinerAPIClient,
     hotkey: Keypair,
     data: bytes,
     file_type: Literal["weights", "optimizer_state", "weights_metadata", "optimizer_state_metadata"],
@@ -103,6 +104,7 @@ async def upload_file(
     3. Complete the file upload
 
     Args:
+        miner_api_client (MinerAPIClient): The miner API client.
         hotkey (Keypair): The hotkey of the miner.
         data (bytes): The data to upload
         file_type (Literal["weights", "optimizer_state"]): The type of file to upload
@@ -125,7 +127,7 @@ async def upload_file(
 
         if file_upload_response is None:
             # Get presigned urls from orchestrator
-            file_upload_response: FileUploadResponse | dict = await MinerS3Client.initiate_file_upload_request(
+            file_upload_response: FileUploadResponse | dict = await miner_api_client.initiate_file_upload_request(
                 hotkey=hotkey,
                 file_upload_request=FileUploadRequest(file_type=file_type, num_parts=num_parts),
             )
@@ -135,20 +137,20 @@ async def upload_file(
                 return file_upload_response
 
         # Upload data to presigned urls
-        parts: list[dict] = await MinerS3Client.upload_multipart_to_s3(
+        parts: list[dict] = await MinerAPIClient.upload_multipart_to_s3(
             urls=file_upload_response.urls, data=data, upload_id=file_upload_response.upload_id
         )
 
         # Complete file upload. Necessary to notify orchestrator that all parts have been uploaded.
-        complete_file_upload_response: CompleteFileUploadResponse | dict = (
-            await MinerS3Client.complete_file_upload_request(
-                hotkey=hotkey,
-                file_upload_completion_request=FileUploadCompletionRequest(
-                    object_name=file_upload_response.object_name,
-                    upload_id=file_upload_response.upload_id,
-                    parts=parts,
-                ),
-            )
+        complete_file_upload_response: (
+            CompleteFileUploadResponse | dict
+        ) = await miner_api_client.complete_file_upload_request(
+            hotkey=hotkey,
+            file_upload_completion_request=FileUploadCompletionRequest(
+                object_name=file_upload_response.object_name,
+                upload_id=file_upload_response.upload_id,
+                parts=parts,
+            ),
         )
 
         if isinstance(complete_file_upload_response, dict):
@@ -162,11 +164,12 @@ async def upload_file(
 
 
 async def upload_tensor(
+    miner_api_client: MinerAPIClient,
     tensor: torch.Tensor,
     hotkey: Keypair,
     file_type: Literal["activation", "weights", "optimizer_state"] = "activation",
 ) -> CompleteFileUploadResponse:
-    initiate_response: FileUploadResponse | dict = await MinerS3Client.initiate_file_upload_request(
+    initiate_response: FileUploadResponse | dict = await miner_api_client.initiate_file_upload_request(
         hotkey=hotkey,
         file_upload_request=FileUploadRequest(
             file_type=file_type,
@@ -189,23 +192,23 @@ async def upload_tensor(
     data = tensor_cpu.view(torch.uint8).numpy().tobytes()
 
     try:
-        parts: list[dict] = await MinerS3Client.upload_multipart_to_s3(
+        parts: list[dict] = await MinerAPIClient.upload_multipart_to_s3(
             urls=initiate_response.urls, data=data, upload_id=initiate_response.upload_id
         )
+
+        response: CompleteFileUploadResponse | dict = await miner_api_client.complete_file_upload_request(
+            hotkey=hotkey,
+            file_upload_completion_request=FileUploadCompletionRequest(
+                object_name=initiate_response.object_name,
+                upload_id=initiate_response.upload_id,
+                parts=parts,
+            ),
+        )
+        return response
+
     except Exception as e:
         logger.error(f"Error uploading multipart to S3: {e}")
         raise
-
-    response: CompleteFileUploadResponse | dict = await MinerS3Client.complete_file_upload_request(
-        hotkey=hotkey,
-        file_upload_completion_request=FileUploadCompletionRequest(
-            object_name=initiate_response.object_name,
-            upload_id=initiate_response.upload_id,
-            parts=parts,
-        ),
-    )
-
-    return response
 
 
 def extract_filename_from_url(url):

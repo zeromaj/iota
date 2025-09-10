@@ -133,7 +133,7 @@ async def download_partitions(
             batch_partitions = new_partitions[batch_start:batch_end]
 
             logger.info(
-                f"Processing batch {batch_start//common_settings.DOWNLOAD_BATCH_SIZE + 1}/{(len(new_partitions) + common_settings.DOWNLOAD_BATCH_SIZE - 1)//common_settings.DOWNLOAD_BATCH_SIZE}: partitions {batch_start} to {batch_end-1}"
+                f"Processing batch {batch_start // common_settings.DOWNLOAD_BATCH_SIZE + 1}/{(len(new_partitions) + common_settings.DOWNLOAD_BATCH_SIZE - 1) // common_settings.DOWNLOAD_BATCH_SIZE}: partitions {batch_start} to {batch_end - 1}"
             )
 
             try:
@@ -191,12 +191,12 @@ async def download_partitions(
                         )
 
                     logger.debug(
-                        f"Weight shard shape: {weight_shard.shape}, expected start idx: {weight_state_start_idx}, expected end idx: {weight_state_end_idx}, range: {weight_state_end_idx-weight_state_start_idx}"
+                        f"Weight shard shape: {weight_shard.shape}, expected start idx: {weight_state_start_idx}, expected end idx: {weight_state_end_idx}, range: {weight_state_end_idx - weight_state_start_idx}"
                     )
                     weights[weight_state_start_idx:weight_state_end_idx] = weight_shard
 
                     logger.debug(
-                        f"Shard optimizer state shape: {optimizer_state_shard.shape}, expected start idx: {optimizer_state_start_idx}, expected end idx: {optimizer_state_end_idx}, range: {optimizer_state_end_idx-optimizer_state_start_idx}"
+                        f"Shard optimizer state shape: {optimizer_state_shard.shape}, expected start idx: {optimizer_state_start_idx}, expected end idx: {optimizer_state_end_idx}, range: {optimizer_state_end_idx - optimizer_state_start_idx}"
                     )
                     optimizer_state[optimizer_state_start_idx:optimizer_state_end_idx] = optimizer_state_shard
 
@@ -209,7 +209,7 @@ async def download_partitions(
 
             except Exception as e:
                 logger.warning(
-                    f"Error in batched download for batch {batch_start//common_settings.DOWNLOAD_BATCH_SIZE + 1}: {e}"
+                    f"Error in batched download for batch {batch_start // common_settings.DOWNLOAD_BATCH_SIZE + 1}: {e}"
                 )
                 partition_download_error_counter += common_settings.DOWNLOAD_BATCH_SIZE
                 continue
@@ -218,7 +218,7 @@ async def download_partitions(
             f"Downloaded {total_parts - partition_download_error_counter} / {total_parts} partitions inside download_and_set_weights_and_optimizer_state"
         )
         logger.info(
-            f"download_and_set_weights_and_optimizer_state downloaded {total_weights_downloaded} / {num_weights} ({(total_weights_downloaded/num_weights)*100}%) weights and {total_optimizer_state_downloaded} / {num_optimizer_state} ({(total_optimizer_state_downloaded/num_optimizer_state)*100}%) optimizer state"
+            f"download_and_set_weights_and_optimizer_state downloaded {total_weights_downloaded} / {num_weights} ({(total_weights_downloaded / num_weights) * 100}%) weights and {total_optimizer_state_downloaded} / {num_optimizer_state} ({(total_optimizer_state_downloaded / num_optimizer_state) * 100}%) optimizer state"
         )
 
         # Cast the model weights and optimizer state to the correct device.
@@ -230,33 +230,39 @@ async def download_partitions(
         raise
 
 
+def _model_suffix(hotkey: str, run_id: str, layer_idx: int) -> str:
+    return f"{hotkey[:8]}_{run_id}_{layer_idx}"
+
+
 def save_model_weights_and_optimizer_state(
-    model_weights: torch.Tensor, optimizer_state_dict: dict, hotkey: str, run_id: str
+    model_weights: torch.Tensor, optimizer_state_dict: dict, hotkey: str, run_id: str, layer_idx: int
 ):
     """Saves the model weights and optimizer state to the weights directory."""
 
     logger.debug(f"Saving model weights and optimizer state for hotkey {hotkey[:8]}")
 
+    model_suffix = _model_suffix(hotkey=hotkey, run_id=run_id, layer_idx=layer_idx)
     try:
         os.makedirs("./weights", exist_ok=True)
-        torch.save(model_weights, f"./weights/current_model_weights_{hotkey[:8]}_{run_id}.pt")
-        torch.save(optimizer_state_dict, f"./weights/current_model_optimizer_state_dict_{hotkey[:8]}_{run_id}.pt")
+        torch.save(model_weights, f"./weights/current_model_weights_{model_suffix}.pt")
+        torch.save(optimizer_state_dict, f"./weights/current_model_optimizer_state_dict_{model_suffix}.pt")
 
         # Remove files from previous runs
         for file in os.listdir("./weights"):
-            if "run_id" not in file:
+            if model_suffix not in file:
                 os.remove(f"./weights/{file}")
     except Exception as e:
         logger.error(f"Error saving model weights and optimizer state: {e}")
 
 
-def load_model_weights_and_optimizer_state(hotkey: str, run_id: str) -> tuple[torch.Tensor, dict]:
+def load_model_weights_and_optimizer_state(hotkey: str, run_id: str, layer_idx: int) -> tuple[torch.Tensor, dict]:
     """Loads the model weights and optimizer state from the weights directory."""
 
     try:
-        logger.debug(f"Loading model weights and optimizer state for hotkey {hotkey[:8]}")
-        model_weights = torch.load(f"./weights/current_model_weights_{hotkey[:8]}_{run_id}.pt")
-        optimizer_state_dict = torch.load(f"./weights/current_model_optimizer_state_dict_{hotkey[:8]}_{run_id}.pt")
+        model_suffix = _model_suffix(hotkey=hotkey, run_id=run_id, layer_idx=layer_idx)
+        logger.debug(f"Loading model weights and optimizer state for suffix {model_suffix}")
+        model_weights = torch.load(f"./weights/current_model_weights_{model_suffix}.pt")
+        optimizer_state_dict = torch.load(f"./weights/current_model_optimizer_state_dict_{model_suffix}.pt")
         return model_weights, optimizer_state_dict
 
     except Exception as e:

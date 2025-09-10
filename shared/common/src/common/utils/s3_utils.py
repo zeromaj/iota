@@ -18,7 +18,9 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries
     Returns:
         list[dict]: The parts that were uploaded.
     """
-    async with aiohttp.ClientSession() as session:
+    # Configure timeout for S3 uploads - allow for larger files with reasonable timeout
+    timeout = aiohttp.ClientTimeout(total=300, connect=30)  # 5 minute total, 30s connect
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         parts = []
 
         part_size = int(math.ceil(len(data) / len(urls)))
@@ -91,6 +93,7 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries
                     aiohttp.ServerTimeoutError,
                     aiohttp.ClientResponseError,
                     asyncio.TimeoutError,
+                    TimeoutError,  # Python built-in TimeoutError
                     ConnectionError,
                     Exception,  # Catch RequestTimeout and other S3-specific errors
                 ) as e:

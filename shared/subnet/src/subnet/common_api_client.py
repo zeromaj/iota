@@ -5,7 +5,6 @@ from common import settings as common_settings
 from common.settings import ORCHESTRATOR_HOST, ORCHESTRATOR_PORT, ORCHESTRATOR_SCHEMA
 from common.utils.epistula import create_message_body, generate_header
 from common.utils.exceptions import APIException
-from common.utils.partitions import MinerPartition
 from loguru import logger
 from substrateinterface.keypair import Keypair
 
@@ -118,14 +117,3 @@ class CommonAPIClient:
         except Exception as e:
             logger.exception(f"Error checking orchestrator health: {e}")
             raise e
-
-    @classmethod
-    async def get_merged_partitions(cls, hotkey: Keypair) -> list[MinerPartition] | dict:
-        try:
-            response = await cls.orchestrator_request(method="GET", path="/common/get_merged_partitions", hotkey=hotkey)
-            if "error_name" in response:
-                return response
-            return [MinerPartition(**partition) for partition in response]
-        except Exception as e:
-            logger.error(f"Error getting merged partitions: {e}")
-            raise

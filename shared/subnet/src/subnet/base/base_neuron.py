@@ -42,8 +42,8 @@ class BaseNeuron:
         self,
         model_config: dict,
         model_metadata: dict,
-        model_weights: torch.Tensor,
-        optimizer_state: dict,
+        model_weights: torch.Tensor | None,
+        optimizer_state: dict | None,
         layer: int,
         device: str,
     ) -> bool:
@@ -67,7 +67,7 @@ class BaseNeuron:
         return True
 
     async def download_and_set_weights_and_optimizer_state(
-        self, device: str
+        self, client: CommonAPIClient, device: str
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         # Get copy of current weights and optimizer state
         old_weights = torch.nn.utils.parameters_to_vector(self.model_manager.model.parameters()).clone()
@@ -77,7 +77,7 @@ class BaseNeuron:
 
         # Get merged partitions from db
         # TODO: This is very ugly, and we should fix it... Moving on.
-        merged_partitions: list[MinerPartition] | BaseErrorModel = await CommonAPIClient.get_merged_partitions(
+        merged_partitions: list[MinerPartition] | BaseErrorModel = await client.get_merged_partitions(
             hotkey=self.wallet.hotkey
         )
         if isinstance(merged_partitions, BaseErrorModel):
