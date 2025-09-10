@@ -1,7 +1,8 @@
-from common.models.api_models import ValidationTaskResponse, ValidatorRegistrationResponse
+from common.models.api_models import ValidationTaskResponse, ValidatorRegistrationResponse, SubnetScores
 from loguru import logger
 from subnet.common_api_client import CommonAPIClient
 from substrateinterface.keypair import Keypair
+from common.utils.partitions import MinerPartition
 
 
 class ValidatorAPIClient(CommonAPIClient):
@@ -18,14 +19,15 @@ class ValidatorAPIClient(CommonAPIClient):
             raise e
 
     @classmethod
-    async def get_global_miner_scores(cls, hotkey: Keypair) -> dict[int, float] | dict:
+    async def get_global_miner_scores(cls, hotkey: Keypair) -> SubnetScores | None:
         """Get the global scores for all miners from the orchestrator."""
         try:
-            response: dict[int, float] = await cls.orchestrator_request(
+            response: SubnetScores = await cls.orchestrator_request(
                 method="GET", path="/validator/global_miner_scores", hotkey=hotkey
             )
             if hasattr(response, "error_name"):
-                return response
+                logger.error(f"Error getting global miner scores: {response}")
+                return
             return response
 
         except Exception as e:
@@ -78,16 +80,14 @@ class ValidatorAPIClient(CommonAPIClient):
             logger.error(f"Error submitting task result to orchestrator: {e}")
             raise e
 
-    @classmethod
-    async def fetch_subnet_burn(cls, hotkey: Keypair) -> float | None:
-        """Fetch the subnet burn factor from the orchestrator."""
+    async def get_merged_partitions(self, hotkey: Keypair) -> list[MinerPartition] | dict:
         try:
-            response: float | None = await cls.orchestrator_request(
-                method="GET", path="/validator/get_subnet_burn", hotkey=hotkey
+            response = await CommonAPIClient.orchestrator_request(
+                method="GET", path="/common/get_merged_partitions", hotkey=hotkey
             )
-            if hasattr(response, "error_name"):
+            if "error_name" in response:
                 return response
-            return response
+            return [MinerPartition(**partition) for partition in response]
         except Exception as e:
-            logger.error(f"Error fetching subnet burn factor from orchestrator: {e}")
-            raise e
+            logger.error(f"Error getting merged partitions: {e}")
+            raise

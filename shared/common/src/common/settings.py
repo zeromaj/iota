@@ -16,7 +16,7 @@ LOG_FILE_ENABLED = os.getenv("LOG_FILE_ENABLED") == "True"
 TEST_MODE = os.getenv("TEST_MODE") == "True"
 
 # Bittensor settings
-__SPEC_VERSION__ = 10_040
+__SPEC_VERSION__ = 10051
 __VALIDATOR_SPEC_VERSION__ = 4065
 BITTENSOR = os.getenv("BITTENSOR") == "True"
 MAX_NUM_PARTS = int(os.getenv("MAX_NUM_PARTS", 10000))
@@ -75,7 +75,7 @@ LR_SAW_CYCLE_LENGTH = 1000
 
 MINI_BATCH_SIZE = 8
 MINI_BATCH_ACCUMULATION_COUNT = 8
-# SEQUENCE_LENGTH = 512
-SEQUENCE_LENGTH = 100
-# Eppch level sync settings
+SEQUENCE_LENGTH = 800
+
+# Epoch level sync settings
 DOWNLOAD_BATCH_SIZE = 50

@@ -265,9 +265,9 @@ async def get_weight_partition_info(
     Returns:
         tuple[list[SubmittedWeightsPresigned], list[int]]: The weight partition info and the partition ids
     """
-    weight_path_per_layer: list[
-        SubmittedWeightsAndOptimizerPresigned
-    ] | dict = await miner_api_client.get_weight_path_per_layer()
+    weight_path_per_layer: (
+        list[SubmittedWeightsAndOptimizerPresigned] | dict
+    ) = await miner_api_client.get_weight_path_per_layer()
 
     if not weight_path_per_layer:
         raise WeightPartitionException("Unknown error getting weight path per layer")
@@ -386,12 +386,17 @@ async def download_batch_partitions(
     )
     downloaded_partitions: list[list[tuple[torch.Tensor, torch.Tensor]]] = filter_exceptions(downloaded_partitions)
     logger.debug(f"Downloaded partitions: {len(downloaded_partitions)}")
-    logger.debug(f"Downloaded partitions[0]: {len(downloaded_partitions[0])}")
-    logger.debug(f"Downloaded partitions[0][0]: {len(downloaded_partitions[0][0])}")
+    if len(downloaded_partitions) > 0:
+        logger.debug(f"Downloaded partitions[0]: {len(downloaded_partitions[0])}")
+        if len(downloaded_partitions[0]) > 0:
+            logger.debug(f"Downloaded partitions[0][0]: {len(downloaded_partitions[0][0])}")
+    else:
+        logger.error("No partitions successfully downloaded for batch")
     return downloaded_partitions
 
 
 async def upload_partition_batch(
+    miner_api_client: MinerAPIClient,
     merge_results: dict[int, tuple[torch.Tensor, torch.Tensor, MinerPartition]],
     filtered_metadata: dict[str, dict[int, dict[str, ChunkMetadata]]],
     hotkey: Keypair,
@@ -402,6 +407,7 @@ async def upload_partition_batch(
     for weight_average, optimizer_state_average, _ in merge_results.values():
         weight_uploads.append(
             upload_tensor(
+                miner_api_client=miner_api_client,
                 tensor=weight_average.detach().cpu(),
                 file_type="weights",
                 hotkey=hotkey,
@@ -409,6 +415,7 @@ async def upload_partition_batch(
         )
         optimizer_state_uploads.append(
             upload_tensor(
+                miner_api_client=miner_api_client,
                 tensor=optimizer_state_average.detach().cpu(),
                 file_type="optimizer_state",
                 hotkey=hotkey,

@@ -9,7 +9,7 @@ import torch
 from aiohttp import web
 from bittensor_wallet import Wallet
 from common import settings as common_settings
-from common.models.api_models import ValidationTaskResponse, ValidatorRegistrationResponse, ValidatorTask
+from common.models.api_models import ValidationTaskResponse, ValidatorRegistrationResponse, ValidatorTask, SubnetScores
 from common.validator.base_validator import BaseValidator
 from loguru import logger
 from subnet.base.base_neuron import BaseNeuron
@@ -17,9 +17,9 @@ from subnet.test_client import TestAPIClient
 from subnet.utils.bt_utils import get_subtensor
 from subnet.utils.s3_torch import download_tensor
 from subnet.validator_api_client import ValidatorAPIClient
-
+from common.models.ml_models import ModelConfig, ModelMetadata
 from validator import settings as validator_settings
-from validator.utils.utils import apply_burn_factor, compute_cosine_similarity, compute_magnitude_ratio
+from validator.utils.utils import compute_cosine_similarity, compute_magnitude_ratio
 
 PENALTY_RATE = 3
 
@@ -67,6 +67,9 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
 
         self.available: bool = True
         self.tracked_miner_hotkey: str | None = None  # hotkey
+        self.model_cfg: ModelConfig | None = None
+        self.model_metadata: ModelMetadata | None = None
+        self.run_id: str | None = None
         self.weight_version: str | None = None
         self.external_ip: str | None = None
 
@@ -229,19 +232,29 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
                 logger.debug(f"GRADIENT VALIDATOR [MINER {self.tracked_miner_hotkey}]: WEIGHT LOOP RUNNING")
                 if await ValidatorAPIClient.check_orchestrator_health(hotkey=self.wallet.hotkey):
                     logger.debug(f"GRADIENT VALIDATOR [MINER {self.tracked_miner_hotkey}]: GETTING GLOBAL MINER SCORES")
-                    global_weights: dict[str, float] = await ValidatorAPIClient.get_global_miner_scores(
+                    global_weights: dict | None = await ValidatorAPIClient.get_global_miner_scores(
                         hotkey=self.wallet.hotkey
                     )
-                    logger.debug(
-                        f"GRADIENT VALIDATOR [MINER {self.tracked_miner_hotkey}]: GLOBAL MINER SCORES: {global_weights}"
-                    )
 
-                    # Safer type conversion
-                    try:
-                        global_weights = {int(uid): weight for uid, weight in global_weights.items()}
-                    except (ValueError, TypeError) as e:
-                        logger.error(f"Invalid UID in global_weights: {e}")
+                    if not global_weights or not isinstance(global_weights, dict):
+                        raise Exception("No global weights received from orchestrator")
+
+                    if "error_name" in global_weights:
+                        logger.error(f"Error getting global weights: {global_weights['error_name']}")
                         global_weights = {}
+                    else:
+                        global_weights = SubnetScores.model_validate(global_weights)
+
+                        logger.debug(
+                            f"GRADIENT VALIDATOR [MINER {self.tracked_miner_hotkey}]: GLOBAL MINER SCORES: {global_weights}"
+                        )
+
+                        # Safer type conversion
+                        try:
+                            global_weights = {int(m.uid): m.weight for m in global_weights.miner_scores}
+                        except (ValueError, TypeError) as e:
+                            logger.error(f"Invalid UID in global_weights: {e}")
+                            global_weights = {}
 
                 else:
                     logger.warning("Orchestrator is not healthy, skipping weight submission")
@@ -284,6 +297,7 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
 
         # Initial setup - this only happens once
         if not common_settings.BITTENSOR:
+            logger.info(f"🔄 Registering validator {self.hotkey[:8]} to metagraph")
             await TestAPIClient.register_to_metagraph(hotkey=self.wallet.hotkey, role="validator")
 
         # Start the healthcheck server
@@ -440,21 +454,16 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
             # Normalize weights
             raw_weights = torch.nn.functional.normalize(scores, p=1, dim=0)
 
-            # Fetch the burn factor from the orchestrator
-            burn_factor = None
+            # Fetch the burn factor from the weights
             try:
-                burn_factor = float(await ValidatorAPIClient.fetch_subnet_burn(hotkey=self.wallet.hotkey))
+                burn_factor = next(
+                    (weight for uid, weight in weights.items() if uid == common_settings.OWNER_UID), None
+                )
             except Exception as e:
                 logger.warning(f"Error fetching burn factor: {e}")
+                burn_factor = None
             if burn_factor is None:
-                burn_factor = common_settings.FALLBACK_BURN_FACTOR
-
-            raw_weights = apply_burn_factor(
-                raw_weights=raw_weights,
-                burn_factor=burn_factor,
-                netuid=int(common_settings.NETUID),
-                owner_uid=common_settings.OWNER_UID,
-            )
+                burn_factor = 0
 
             # Process the raw weights to final_weights via subtensor limitations
             (
@@ -515,23 +524,6 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
 
         return dict(zip(meta.uids, list(stake_weighted_average)))
 
-    async def set_burn_factor(self, burn_factor: float) -> ValidationTaskResponse:
-        """
-        Method that allows us to change the burn factor via the orchestrator
-        """
-        previous_burn_factor = self.burn_factor
-        self.burn_factor = burn_factor
-
-        logger.info(
-            f"🔥 Burn factor changed from {previous_burn_factor} to {self.burn_factor} for validator {self.hotkey[:8]} 🔥"
-        )
-        return ValidationTaskResponse(
-            success=True,
-            score=0,
-            reason=f"Burn factor changed from {previous_burn_factor} to {self.burn_factor}",
-            task_type="set_burn_factor",
-        )
-
     async def register_with_orchestrator(self) -> None:
         try:
             response: ValidatorRegistrationResponse = await ValidatorAPIClient.register_validator_request(
@@ -541,6 +533,9 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
             self.layer = int(response.layer)
             self.tracked_miner_hotkey = response.miner_hotkey_to_track
             self.available = False
+            self.model_cfg = response.model_cfg
+            self.model_metadata = response.model_metadata
+            self.run_id = response.run_id
 
         except Exception as e:
             raise e
@@ -573,8 +568,8 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
                 layer=self.layer,
                 device=validator_settings.DEVICE,
                 model_weights=None,
-                model_config=None,
-                model_metadata=None,
+                model_config=self.model_cfg.model_dump(),
+                model_metadata=self.model_metadata.model_dump(),
                 optimizer_state=None,
             ):
                 raise Exception("Error setting up local model")

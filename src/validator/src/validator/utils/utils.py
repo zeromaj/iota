@@ -64,22 +64,3 @@ def compute_magnitude_ratio(validator_flat: torch.Tensor, miner_flat: torch.Tens
     )
 
     return magnitude_ratio.item()
-
-
-def apply_burn_factor(raw_weights: torch.Tensor, burn_factor: float, netuid: int, owner_uid: int = 209) -> torch.Tensor:
-    """Apply the burn factor to the raw weights.
-
-    Args:
-        raw_weights (torch.Tensor): The raw weights.
-        burn_factor (float): The burn factor.
-        netuid (int): The netuid.
-        owner_uid (int): The owner uid.
-    """
-    if burn_factor <= 1 and netuid == 9 and raw_weights[owner_uid] < burn_factor:
-        raw_weights = raw_weights * (1 - burn_factor)
-
-        # Add the 1-1/burn factor to the owner uid
-        if len(raw_weights) > owner_uid:
-            raw_weights[owner_uid] = burn_factor
-
-    return raw_weights
