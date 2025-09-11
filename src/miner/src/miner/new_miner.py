@@ -511,6 +511,7 @@ class Miner(BaseNeuron, HealthServerMixin):
                 run_info_list = await self.miner_api_client.fetch_run_info_request()
                 if not run_info_list:
                     raise Exception("Fatal Error: Could not fetch run info")
+
                 best_run = identify_best_run(run_info_list=run_info_list)
                 logger.info(f"✅ Best run for miner {self.hotkey[:8]} is {best_run.run_id}")
 

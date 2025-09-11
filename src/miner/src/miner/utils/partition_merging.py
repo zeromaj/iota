@@ -290,7 +290,9 @@ async def merge_partition_batch(
     num_metadata_chunks: int,
 ) -> dict[int, tuple[torch.Tensor, torch.Tensor, MinerPartition]]:
     merge_results: dict[MinerPartition, tuple[torch.Tensor, torch.Tensor]] = {}
+
     for partition, downloaded_partition in zip(batch_partitions, downloaded_partitions):
+        # Optional logging:
         if num_metadata_chunks is not None:
             if partition.chunk_number >= num_metadata_chunks:
                 logger.warning(
@@ -299,6 +301,7 @@ async def merge_partition_batch(
                 continue
         else:
             logger.warning(f"No metadata chunks found. Skipping partition {partition.chunk_number}")
+
         try:
             logger.debug(f"merging partition {partition.chunk_number}")
 
@@ -348,10 +351,13 @@ async def merge_partition_batch(
             optimizer_state_average /= optimizer_state_counter
             optimizer_state_average = optimizer_state_average.to(torch.bfloat16)
 
+            # Add the merge result to the merge results dictionary
             merge_results[partition.chunk_number] = (weight_average, optimizer_state_average, partition)
-            return merge_results
+
         except Exception as e:
             logger.exception(f"Failed to get partition {partition.chunk_number}: {e}")
+
+    return merge_results
 
 
 async def get_partition_batch(batch_index: int, partitions: list[MinerPartition]) -> list[MinerPartition]:
