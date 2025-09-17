@@ -3,7 +3,7 @@ import math
 from itertools import combinations
 import pytest
 
-from common.utils.partitions import assign_cells_to_pairs
+from common.utils.partitions import get_pairs_for_miner
 
 
 # @pytest.mark.parametrize("n_layer_miners", range(2, 256//5))
@@ -39,7 +39,7 @@ def test_assign_cells_to_pairs_has_all_pairings(n_layer_miners: int) -> None:
 
         submitting_miners = rng.sample(layer_miners, n_submit)
 
-        assignments = assign_cells_to_pairs(miner_hotkeys=submitting_miners, n_partitions=n_splits)
+        assignments = get_pairs_for_miner(miner_hotkeys=submitting_miners, n_partitions=n_splits)
 
         # Collect the set of *unique* pairs produced by the function.
         returned_pairs = {frozenset(p) for p in assignments.values()}
@@ -78,7 +78,7 @@ def test_duplicate_assignments() -> None:
 
         miner_hotkeys = [f"miner_{i}" for i in range(submitted_count)]
 
-        assignments = assign_cells_to_pairs(
+        assignments = get_pairs_for_miner(
             miner_hotkeys=miner_hotkeys,
             n_partitions=n_splits,
         )

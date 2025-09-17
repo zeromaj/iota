@@ -29,7 +29,7 @@ class FileUploadResponse(BaseModel):
 
 class FileUploadRequest(BaseModel):
     num_parts: int
-    file_type: Literal["weights", "optimizer_state", "activation", "weights_metadata", "optimizer_state_metadata"]
+    file_type: Literal["weights", "optimizer_state", "activation", "weights_metadata", "local_optimizer_state"]
 
     @model_validator(mode="after")
     def validate_num_parts(self):
@@ -58,8 +58,6 @@ class SyncActivationAssignmentsRequest(BaseModel):
 class WeightUpdate(BaseModel):
     weights_path: str
     weights_metadata_path: str
-    optimizer_state_path: str
-    optimizer_state_metadata_path: str
 
 
 class MinerRegistrationResponse(BaseModel):
@@ -97,10 +95,7 @@ class SubmittedWeightsAndOptimizerPresigned(BaseModel):
     layer: int
     weights_path_presigned: str
     weight_metadata_path_presigned: str
-    optimizer_state_path_presigned: str
-    optimizer_state_metadata_path_presigned: str
     weight_metadata_path: str
-    optimizer_state_metadata_path: str
     weighting_factor: int | None = None
 
 

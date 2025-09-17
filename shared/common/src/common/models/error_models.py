@@ -18,6 +18,24 @@ class LayerStateError(BaseModel):
         return self
 
 
+class FileSizeError(Exception):
+    def __init__(self, message: str = "File size validation failed", **kwargs):
+        super().__init__(message)
+        self.message = message
+
+
+class FileTooOldError(Exception):
+    def __init__(self, message: str = "File is too old", **kwargs):
+        super().__init__(message)
+        self.message = message
+
+
+class S3FileNotFoundError(Exception):
+    def __init__(self, message: str = "S3 file not found", **kwargs):
+        super().__init__(message)
+        self.message = message
+
+
 class EntityNotRegisteredError(BaseModel):
     message: str = "Entity not registered"
     name: Optional[str] = None

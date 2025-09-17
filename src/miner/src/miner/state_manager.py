@@ -24,7 +24,6 @@ class StateManager(BaseModel):
     cache: dict[str, CacheEntry] = {}
     backwards_since_reset: int = 0
     training_epoch_when_registered: int = None
-    num_metadata_chunks: int | None = None
     run_id: str = None
     backwards_since_last_optim: int = 0
     local_optimization_steps: int = 0

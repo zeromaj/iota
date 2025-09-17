@@ -1,12 +1,14 @@
+from abc import abstractmethod
 import asyncio
-
 from aiohttp import ClientSession, ClientTimeout
+from loguru import logger
+from substrateinterface.keypair import Keypair
+
 from common import settings as common_settings
 from common.settings import ORCHESTRATOR_HOST, ORCHESTRATOR_PORT, ORCHESTRATOR_SCHEMA
 from common.utils.epistula import create_message_body, generate_header
-from common.utils.exceptions import APIException
-from loguru import logger
-from substrateinterface.keypair import Keypair
+from common.utils.exceptions import APIException, RateLimitException
+from common.utils.partitions import MinerPartition
 
 HEADER_REQUEST_ID = "X-Request-Id"
 
@@ -25,7 +27,6 @@ class CommonAPIClient:
         )
 
         headers = None
-        error = None
         request_id = None  # Will be extracted from response
         body_bytes = create_message_body(data={} if not body else body)
 
@@ -53,59 +54,34 @@ class CommonAPIClient:
                         # Add request ID to logger context for all subsequent logs
                         with logger.contextualize(request_id=request_id):
                             if response.status == 429:
-                                response_text = await response.text() if not response_text else response_text
-                                logger.warning(
-                                    f"Rate limited on request to endpoint {path}: {response.status} - {response_text}"
-                                )
-                            if response.status == 404:
-                                response_text = await response.text() if not response_text else response_text
-                                logger.error(
-                                    f"Bad request on request to endpoint {path}: {response.status} - {response_text}"
-                                )
-                                raise APIException(
-                                    f"Bad request on request to endpoint {path}: {response.status} - {response_text}"
-                                )
-                            if response.status != 200:
-                                # Handle non-JSON error responses
-                                response_text = await response.text() if not response_text else response_text
-                                if response.status == 429:
-                                    logger.warning(
-                                        f"Rate limited on request to endpoint {path}: {response.status} - {response_text}"
-                                    )
-                                else:
-                                    logger.error(
-                                        f"Error making orchestrator request to endpoint {path}: {response.status} - {response_text}"
-                                    )
-                                await asyncio.sleep(2)
-                            else:
-                                response_json = await response.json()
-                                logger.debug(
-                                    f"Successfully completed request to {path}; response: {str(response_json)[:100]}"
-                                )
-                                return response_json
-            except Exception as e:
-                # Log with request ID if we have one
-                if request_id:
-                    with logger.contextualize(request_id=request_id):
-                        logger.error(f"Error making orchestrator request: {e}")
-                else:
-                    logger.error(f"Error making orchestrator request: {e}")
-                error = e
+                                logger.warning(f"Rate limited on request to endpoint {path}")
+                                await asyncio.sleep(2**i)
+                                continue
 
-        # Final error logging with request ID context if available
-        if error:
-            if request_id:
-                with logger.contextualize(request_id=request_id):
-                    logger.error(
-                        f"Failed to complete request to {path} after {common_settings.REQUEST_RETRY_COUNT} attempts"
-                    )
-            raise error
-        else:
-            error_msg = f"Got bad/no response from orchestrator: {response.status}, {response_text}"
-            if request_id:
-                with logger.contextualize(request_id=request_id):
-                    logger.error(error_msg)
-            raise Exception(error_msg)
+                            if response.status != 200:
+                                # Handle non-JSON error responses first
+                                response_text = await response.text() if not response_text else response_text
+                                msg = f"{response.status} - {response_text}"
+                                raise APIException(f"Error making orchestrator request to endpoint {path}: {msg}")
+
+                            # Success.
+                            response_json = await response.json()
+                            logger.debug(
+                                f"Successfully completed request to {path}; response: {str(response_json)[:100]}"
+                            )
+                            return response_json
+
+            except Exception:
+                raise
+
+        # The only time you get here is because you've exhausted all retries.
+        error_msg = (
+            f"Failed request after {common_settings.REQUEST_RETRY_COUNT} attempts: {response.status}, {response_text}"
+        )
+        if request_id:
+            with logger.contextualize(request_id=request_id):
+                logger.error(error_msg)
+        raise RateLimitException(error_msg)
 
     @classmethod
     async def check_orchestrator_health(cls, hotkey: Keypair) -> bool | dict:
@@ -117,3 +93,11 @@ class CommonAPIClient:
         except Exception as e:
             logger.exception(f"Error checking orchestrator health: {e}")
             raise e
+
+    @abstractmethod
+    async def get_merged_partitions(self, hotkey: Keypair) -> list[MinerPartition] | dict:
+        pass
+
+    @abstractmethod
+    async def get_num_splits(self) -> int | dict:
+        pass

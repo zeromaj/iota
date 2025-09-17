@@ -42,13 +42,17 @@ class ChunkMetadata(BaseModel):
     @model_validator(mode="after")
     def verify_type(self):
         if self.data_type == "weights":
-            assert "weight" in self.tensor_path, "Weights tensor path does not contain 'weight'"
-            assert "weight" in self.metadata_path, "Weights metadata path does not contain 'weight'"
+            assert (
+                "weight" in self.tensor_path
+            ), f"Weights tensor path (path: {self.tensor_path}) does not contain 'weight'"
+            assert (
+                "weight" in self.metadata_path
+            ), f"Weights metadata path (path: {self.metadata_path}) does not contain 'weight'"
         elif self.data_type == "optimizer_state":
             assert (
                 "optimizer_state" in self.tensor_path
-            ), "Optimizer state tensor path does not contain 'optimizer_state'"
+            ), f"Optimizer state tensor path (path: {self.tensor_path}) does not contain 'optimizer_state'"
             assert (
                 "optimizer_state" in self.metadata_path
-            ), "Optimizer state metadata path does not contain 'optimizer_state'"
+            ), f"Optimizer state metadata path (path: {self.metadata_path}) does not contain 'optimizer_state'"
         return self
