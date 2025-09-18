@@ -255,7 +255,7 @@ def extract_filename_from_url(url):
     return filename
 
 
-async def wait_for_state(state: LayerPhase, miner_api_client: MinerAPIClient):
+async def wait_for_state(state: LayerPhase, miner_api_client: MinerAPIClient, raise_bad_sync: bool = True):
     while True:
         await asyncio.sleep(5)
         logger.info(f"Waiting for state {state}")
@@ -268,6 +268,7 @@ async def wait_for_state(state: LayerPhase, miner_api_client: MinerAPIClient):
             continue
         else:
             miner_api_client.layer_state = LayerPhase.TRAINING
-            raise LayerStateException(
-                f"Miner is out of sync with the orchestrator. Miner is waiting for orchestrator to be in state {state}, but orchestrator is in state {response}, setting state to training"
-            )
+            if raise_bad_sync:
+                raise LayerStateException(
+                    f"Miner is out of sync with the orchestrator. Miner is waiting for orchestrator to be in state {state}, but orchestrator is in state {response}, setting state to training"
+                )
