@@ -23,3 +23,5 @@ DEVICE = os.getenv("DEVICE", "cpu")
 TIMEOUT = int(os.getenv("MINER_TIMEOUT", "300"))  # 5 minutes default
 PACK_SAMPLES = os.getenv("PACK_SAMPLES", "True") == "True"
 N_PARTITION_BATCHES = int(os.getenv("N_PARTITION_BATCHES", "10"))
+
+PREVIOUS_WEIGHTS = os.getenv("MODEL_DIR", "./weights")

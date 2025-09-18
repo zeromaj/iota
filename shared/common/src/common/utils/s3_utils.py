@@ -24,6 +24,7 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries
         parts = []
 
         part_size = int(math.ceil(len(data) / len(urls)))
+        assert part_size > 0, "Part size is 0"
         chunks = [data[i : i + part_size] for i in range(0, len(data), part_size)]
 
         logger.info(f"uploading {len(chunks)} chunks with part size {part_size}")
@@ -144,12 +145,22 @@ async def download_file(presigned_url: str, max_retries: int = 3):
 
 
 def filter_exceptions(*args) -> list[Any]:
-    bad_indices = []
+    bad_indices = set()
+    # Track actual exceptions for logging without relying on indices across tuples
+    collected_exceptions: list[Exception] = []
     for arg in args:
         for i, element in enumerate(arg):
             if isinstance(element, Exception):
-                bad_indices.append(i)
+                bad_indices.add(i)
+                collected_exceptions.append(element)
+
+    # Filter each iterable by bad indices
     result = tuple([[e for i, e in enumerate(arg) if i not in bad_indices] for arg in args])
+
+    # Log the collected exceptions safely
+    if collected_exceptions:
+        logger.error(collected_exceptions)
+
     if len(result) == 1:
         return result[0]
     return result

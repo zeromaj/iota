@@ -23,7 +23,27 @@ from loguru import logger
 from subnet.miner_api_client import MinerAPIClient
 
 
-async def create_metadata(weights_tensor: torch.Tensor, num_sections: int) -> dict:
+async def get_start_and_end_indices(tensor_length: int, num_sections: int, target_section: int) -> tuple[int, int]:
+    """Get the start and end indices for a tensor.
+
+    Args:
+        tensor_length (int): The length of the tensor to get the start and end indices for.
+        num_sections (int): The number of sections to split the tensor into.
+        target_section (int): The target section to get the start and end indices for.
+
+    Returns:
+        tuple[int, int]: The start and end indices for the target section.
+    """
+    assert target_section < num_sections, "Target section is greater than the number of sections"
+    section_size = tensor_length // num_sections
+    for i in range(int(min(target_section + 1, num_sections))):
+        start_idx = i * section_size
+        end_idx = start_idx + section_size if i < num_sections - 1 else tensor_length
+        assert start_idx is not None and end_idx is not None, "Start idx and end idx are missing"
+    return start_idx, end_idx
+
+
+async def create_metadata(tensor: torch.Tensor, num_sections: int) -> dict:
     """Create metadata for a tensor.
 
     Args:
@@ -35,21 +55,21 @@ async def create_metadata(weights_tensor: torch.Tensor, num_sections: int) -> di
     """
     # Create metadata about the tensor
     tensor_metadata = {
-        "dtype": str(weights_tensor.dtype),
-        "size": weights_tensor.size(),
-        "num_elements": weights_tensor.numel(),
-        "element_size": weights_tensor.itemsize,
-        "total_bytes": weights_tensor.nbytes,  # this is just weights_tensor.numel() * weights_tensor.itemsize
+        "dtype": str(tensor.dtype),
+        "size": tensor.size(),
+        "num_elements": tensor.numel(),
+        "element_size": tensor.itemsize,
+        "total_bytes": tensor.nbytes,  # this is just weights_tensor.numel() * weights_tensor.itemsize
     }
 
     # Number of sections to split into (in elements, or indices)
-    section_size = weights_tensor.numel() // num_sections
+    section_size = tensor.numel() // num_sections
     # Create section metadata
     sections_metadata = {}
 
     for i in range(int(num_sections)):
         start_idx = i * section_size
-        end_idx = start_idx + section_size if i < num_sections - 1 else weights_tensor.numel()
+        end_idx = start_idx + section_size if i < num_sections - 1 else tensor.numel()
 
         # Calculate corresponding tensor indices
         start_byte = start_idx * tensor_metadata["element_size"]
@@ -142,15 +162,15 @@ async def upload_file(
         )
 
         # Complete file upload. Necessary to notify orchestrator that all parts have been uploaded.
-        complete_file_upload_response: (
-            CompleteFileUploadResponse | dict
-        ) = await miner_api_client.complete_file_upload_request(
-            hotkey=hotkey,
-            file_upload_completion_request=FileUploadCompletionRequest(
-                object_name=file_upload_response.object_name,
-                upload_id=file_upload_response.upload_id,
-                parts=parts,
-            ),
+        complete_file_upload_response: CompleteFileUploadResponse | dict = (
+            await miner_api_client.complete_file_upload_request(
+                hotkey=hotkey,
+                file_upload_completion_request=FileUploadCompletionRequest(
+                    object_name=file_upload_response.object_name,
+                    upload_id=file_upload_response.upload_id,
+                    parts=parts,
+                ),
+            )
         )
 
         if isinstance(complete_file_upload_response, dict):
@@ -167,7 +187,7 @@ async def upload_tensor(
     miner_api_client: MinerAPIClient,
     tensor: torch.Tensor,
     hotkey: Keypair,
-    file_type: Literal["activation", "weights", "optimizer_state"] = "activation",
+    file_type: Literal["activation", "weights", "optimizer_state", "local_optimizer_state"] = "activation",
 ) -> CompleteFileUploadResponse:
     initiate_response: FileUploadResponse | dict = await miner_api_client.initiate_file_upload_request(
         hotkey=hotkey,
@@ -176,6 +196,7 @@ async def upload_tensor(
             num_parts=1,
         ),
     )
+    assert len(tensor) > 0, "Tensor is empty"
 
     if not initiate_response:
         raise Exception("Error initiating file upload")
@@ -207,7 +228,7 @@ async def upload_tensor(
         return response
 
     except Exception as e:
-        logger.error(f"Error uploading multipart to S3: {e}")
+        logger.exception(f"Error uploading multipart to S3: {e}")
         raise
 
 

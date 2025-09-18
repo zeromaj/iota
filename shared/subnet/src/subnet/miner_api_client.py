@@ -165,17 +165,17 @@ class MinerAPIClient(CommonAPIClient):
             logger.error(f"Error getting weight path per layer: {e}")
             raise
 
-    async def get_num_splits(self) -> int | dict:
-        """Get the number of splits for a given hotkey."""
+    async def notify_orchestrator_of_state_call(self) -> int | dict:
+        """Notify the orchestrator of a state call."""
         try:
             response: int | dict = await CommonAPIClient.orchestrator_request(
                 method="GET",
-                path="/miner/get_num_splits",
+                path="/miner/notify_orchestrator_of_state_call",
                 hotkey=self.hotkey,
             )
             return self.parse_response(response)
         except Exception as e:
-            logger.error(f"Error getting number of splits: {e}")
+            logger.error(f"Error notifying orchestrator of state call: {e}")
             raise
 
     async def get_learning_rate(self) -> float | dict:
@@ -223,6 +223,8 @@ class MinerAPIClient(CommonAPIClient):
 
     @classmethod
     async def upload_multipart_to_s3(cls, urls: list[str], data: bytes, upload_id: str) -> list[dict]:
+        assert len(urls) > 0, "No URLs provided"
+        assert len(data) > 0, "No data provided"
         parts = await upload_parts(urls=urls, data=data, upload_id=upload_id)
         return parts
 
@@ -279,3 +281,20 @@ class MinerAPIClient(CommonAPIClient):
                 raise Exception(f"Unexpected error from orchestrator. Response: {response}")
         else:
             return response
+
+    async def get_previous_partitions(self, partition_indices: list[int]) -> list[MinerPartition] | dict:
+        try:
+            response = await CommonAPIClient.orchestrator_request(
+                method="GET",
+                path="/miner/get_previous_partitions",
+                hotkey=self.hotkey,
+                body=partition_indices,
+            )
+            response = self.parse_response(response)
+            if response is None:
+                logger.warning(f"No previous partitions found for partition indices: {partition_indices}")
+            return [MinerPartition(**partition) for partition in response]
+
+        except Exception as e:
+            logger.error(f"Error getting previous partitions: {e}")
+            raise

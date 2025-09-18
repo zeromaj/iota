@@ -34,7 +34,7 @@ class MockModel(torch.nn.Module):
         output_activations.backward(activation_grads)
 
     def parameters(self):
-        return [p for p in super().parameters()]
+        return super().parameters()
 
 
 class ModelManager:
@@ -104,9 +104,14 @@ class ModelManager:
             logger.info(
                 f"⏳ Setting model weights and optimizer state for layer {self.layer} for miner {self.logger_attributes['hotkey'][:8]} on initialization"
             )
-            await self.set_model_weights_and_optimizer_state(
-                model_weights=model_weights, optimizer_state=optimizer_state
-            )
+            if optimizer_state is not None:
+                await self.set_model_weights_and_optimizer_state(
+                    model_weights=model_weights, optimizer_state=optimizer_state
+                )
+            else:
+                logger.warning(
+                    f"No optimizer state provided for miner on initialization: {self.logger_attributes['hotkey'][:8]}"
+                )
 
             # Load the tokenizer and vocab info if this is the first or last layer
             if layer == 0 or layer == self.model_metadata["n_splits"] - 1:
@@ -227,13 +232,12 @@ class ModelManager:
         """
 
         # Ensure that both model weights and optimizer state are provided.
-        if model_weights is not None and optimizer_state is not None:
+        if model_weights is not None:
             torch.nn.utils.vector_to_parameters(model_weights, self.model.parameters())  # inplace operation.
+        else:
+            logger.info("No model weights provided, keeping random weights! 🎲")
+        if optimizer_state is not None:
             self.optimizer.load_state_dict(optimizer_state)
-        elif model_weights is None and optimizer_state is not None:
-            raise Exception("Model weights must be provided if optimizer state is provided")
-        elif model_weights is not None and optimizer_state is None:
-            raise Exception("Optimizer state must be provided if model weights are provided")
         else:
             logger.info("No model weights or optimizer state provided, keeping random weights! 🎲")
 
