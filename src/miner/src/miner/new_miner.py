@@ -84,9 +84,6 @@ class Miner(BaseNeuron, HealthServerMixin):
         logger.info(f"🚀 Starting miner {self.hotkey[:8]} on layer {self.layer} | Timeout: {miner_settings.TIMEOUT}s")
 
         # You will only enter the while loop if we are in the training state.
-        await wait_for_state(
-            state=LayerPhase.MERGING_PARTITIONS, miner_api_client=self.miner_api_client, raise_bad_sync=False
-        )
         await wait_for_state(state=LayerPhase.TRAINING, miner_api_client=self.miner_api_client, raise_bad_sync=False)
 
         while True:
