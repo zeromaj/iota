@@ -1,11 +1,12 @@
 import time
-
 import torch
 from bittensor import Wallet
-from common import settings as common_settings
 from loguru import logger
 from pydantic import BaseModel
+
+from common import settings as common_settings
 from subnet.miner_api_client import MinerAPIClient
+from common.models.run_flags import RunFlags
 
 
 class CacheEntry(BaseModel):
@@ -27,6 +28,7 @@ class StateManager(BaseModel):
     run_id: str = None
     backwards_since_last_optim: int = 0
     local_optimization_steps: int = 0
+    run_flags: RunFlags = None
 
     class Config:
         arbitrary_types_allowed = True

@@ -2,22 +2,23 @@ import asyncio
 import random
 import time
 from typing import Literal, Optional
-
 import bittensor as bt
 import numpy as np
 import torch
 from aiohttp import web
 from bittensor_wallet import Wallet
+from loguru import logger
+
 from common import settings as common_settings
 from common.models.api_models import ValidationTaskResponse, ValidatorRegistrationResponse, ValidatorTask, SubnetScores
+from common.models.run_flags import RunFlags
 from common.validator.base_validator import BaseValidator
-from loguru import logger
+from common.models.ml_models import ModelConfig, ModelMetadata
 from subnet.base.base_neuron import BaseNeuron
 from subnet.test_client import TestAPIClient
 from subnet.utils.bt_utils import get_subtensor
 from subnet.utils.s3_torch import download_tensor
 from subnet.validator_api_client import ValidatorAPIClient
-from common.models.ml_models import ModelConfig, ModelMetadata
 from validator import settings as validator_settings
 from validator.utils.utils import compute_cosine_similarity, compute_magnitude_ratio
 
@@ -69,9 +70,9 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
         self.tracked_miner_hotkey: str | None = None  # hotkey
         self.model_cfg: ModelConfig | None = None
         self.model_metadata: ModelMetadata | None = None
-        self.run_id: str | None = None
         self.weight_version: str | None = None
         self.external_ip: str | None = None
+        self.run_flags: RunFlags | None = None
 
         # Circuit breaker state
         self._orchestrator_failure_count: int = 0
@@ -536,6 +537,7 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
             self.model_cfg = response.model_cfg
             self.model_metadata = response.model_metadata
             self.run_id = response.run_id
+            self.run_flags = response.run_flags
 
         except Exception as e:
             raise e
@@ -571,6 +573,7 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
                 model_config=self.model_cfg.model_dump(),
                 model_metadata=self.model_metadata.model_dump(),
                 optimizer_state=None,
+                run_id=self.run_id,
             ):
                 raise Exception("Error setting up local model")
 

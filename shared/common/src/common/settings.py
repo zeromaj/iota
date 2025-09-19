@@ -16,7 +16,7 @@ LOG_FILE_ENABLED = os.getenv("LOG_FILE_ENABLED") == "True"
 TEST_MODE = os.getenv("TEST_MODE") == "True"
 
 # Bittensor settings
-__SPEC_VERSION__ = 20002
+__SPEC_VERSION__ = 20004
 __VALIDATOR_SPEC_VERSION__ = 4065
 BITTENSOR = os.getenv("BITTENSOR") == "True"
 MAX_NUM_PARTS = int(os.getenv("MAX_NUM_PARTS", 10000))
@@ -80,6 +80,6 @@ SEQUENCE_LENGTH = 800
 # Epoch level sync settings
 DOWNLOAD_BATCH_SIZE = 50
 
-MAX_NUM_MINERS = 9 if MOCK else 70
+MAX_NUM_MINERS = int(os.getenv("MAX_NUM_MINERS", 9 if MOCK else 70))
 NESTEROV_LEARNING_RATE = 0.7
 NESTEROV_MOMENTUM = 0.9
