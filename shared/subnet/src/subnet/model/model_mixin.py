@@ -1,5 +1,6 @@
 import math
 
+from subnet.utils.partition_utils import load_model_weights
 import torch
 from common import settings as common_settings
 from common.utils.exceptions import NanInfException
@@ -49,6 +50,8 @@ class ModelManager:
         self.device: str | None = None
         self.logger_attributes: dict | None = None
         self.optimizer_step_count: int = 0
+        self.epoch_on_registration: int = 0
+        self.epoch_counter: int = 0
 
     async def initialize_model_manager(
         self,
@@ -283,10 +286,23 @@ class ModelManager:
         logger.debug(f"Setting learning rate to {learning_rate}")
         self.optimizer.param_groups[0]["lr"] = learning_rate
         logger.debug(f"Stepping optimizer for miner {self.logger_attributes['hotkey'][:8]}")
-        self.optimizer.step()
 
-        # Zero the gradients
+        # Step and zero the gradients
+        self.optimizer.step()
         self.optimizer.zero_grad()
+
+        # TODO: Remove this once we have a better way to handle local optimization step.
+        # If a miner registers at a later epoch that epoch = 1, their local optimizer can be completely bogus.
+        # This is a "warm up" period, where a miner can continue to do work, but we just *dont* up date their local weights.
+        if self.epoch_counter <= 2 and self.epoch_on_registration > 1:
+            # load our previous weights into memory
+            logger.info(
+                f"Keeping previous weights for miner {self.logger_attributes['hotkey'][:8]} with epoch counter {self.epoch_counter} and epoch on registration {self.epoch_on_registration}"
+            )
+            loaded_weights = load_model_weights(
+                hotkey=self.logger_attributes["hotkey"], run_id=self.logger_attributes["run_id"], layer_idx=self.layer
+            )
+            torch.nn.utils.vector_to_parameters(loaded_weights, self.model.parameters())
 
         logger.info(f"{self.logger_attributes['hotkey'][:8]} completed local optimization step")
 

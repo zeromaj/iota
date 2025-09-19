@@ -76,11 +76,10 @@ class Miner(BaseNeuron, HealthServerMixin):
         self.partitions_submitted: bool = False
         self.miner_api_client: MinerAPIClient = MinerAPIClient(hotkey=self.wallet.hotkey)
         self.need_to_pull_weights = True
+        # test
 
     async def run(self):
-        download_local_optimizer = True
         await self.reset_miner_state()
-
         logger.info(f"🚀 Starting miner {self.hotkey[:8]} on layer {self.layer} | Timeout: {miner_settings.TIMEOUT}s")
 
         # You will only enter the while loop if we are in the training state.
@@ -112,9 +111,8 @@ class Miner(BaseNeuron, HealthServerMixin):
                                 await self.download_and_set_global_weights(
                                     device=miner_settings.DEVICE,
                                     client=self.miner_api_client,
-                                    download_local_optimizer_state=download_local_optimizer,
+                                    download_local_optimizer_state=False,
                                 )
-                                download_local_optimizer = False
                             except Exception as e:
                                 logger.exception(f"Error downloading and setting weights: {e}")
                             finally:
@@ -136,6 +134,7 @@ class Miner(BaseNeuron, HealthServerMixin):
                         self.need_to_pull_weights = False
 
                         await self.step()
+
                         self.weights_submitted = False
                         self.partitions_submitted = False
                         continue
@@ -185,6 +184,8 @@ class Miner(BaseNeuron, HealthServerMixin):
                             logger.info(f"🔄 Miner {self.hotkey[:8]} already submitted partitions, skipping...")
                             await wait_for_state(state=LayerPhase.TRAINING, miner_api_client=self.miner_api_client)
 
+                        # Epoch counter for local optimization step
+                        self.model_manager.epoch_counter += 1
                         continue
 
                 await asyncio.sleep(1.1)
@@ -580,14 +581,19 @@ class Miner(BaseNeuron, HealthServerMixin):
                         f"Miner {self.hotkey[:8]} registered with no layer assigned, this should not happen"
                     )
 
+                # TODO: clean these up
                 self.layer = assigned_layer
                 self.state_manager.layer = assigned_layer
                 self.state_manager.training_epoch_when_registered = current_epoch
                 self.state_manager.run_id = response.run_id
+                self.run_id = response.run_id
+                self.model_manager.epoch_on_registration = current_epoch
+                self.state_manager.run_flags = response.run_flags
 
                 logger.success(
                     f"✅ Miner {self.hotkey[:8]} registered successfully in layer {self.state_manager.layer} on training epoch {current_epoch}"
                 )
+                logger.debug(f"Run flags for miner {self.hotkey[:8]}: {self.state_manager.run_flags}")
                 return response.model_cfg.model_dump(), response.model_metadata.model_dump()
 
             except Exception as e:

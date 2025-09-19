@@ -1,9 +1,10 @@
 from typing import Literal
-
-from common import settings
 from fastapi import HTTPException
 from pydantic import BaseModel, model_validator
+
+from common import settings
 from common.models.ml_models import ModelConfig, ModelMetadata
+from common.models.run_flags import RunFlags
 
 
 class WeightsUploadResponse(BaseModel):
@@ -66,6 +67,7 @@ class MinerRegistrationResponse(BaseModel):
     model_cfg: ModelConfig | None = None
     model_metadata: ModelMetadata | None = None
     run_id: str
+    run_flags: RunFlags
 
 
 class ValidatorRegistrationResponse(BaseModel):
@@ -75,6 +77,7 @@ class ValidatorRegistrationResponse(BaseModel):
     model_cfg: ModelConfig | None = None
     model_metadata: ModelMetadata | None = None
     run_id: str
+    run_flags: RunFlags
 
 
 class LossReportRequest(BaseModel):
@@ -199,3 +202,4 @@ class RunInfo(BaseModel):
     burn_factor: float
     incentive_perc: float
     authorized: bool
+    run_flags: RunFlags

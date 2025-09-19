@@ -25,6 +25,8 @@ class BaseNeuron:
         self.status: str = MinerStatus.IDLE.value
         self.registration_time: str = datetime.now().isoformat()
         self.merge_status: str = LayerPhase.TRAINING.value
+        self.epoch_on_registration: int | None = None
+        self.run_id: str | None = None
 
         self.model_manager = ModelManager()
         self.num_partitions: int | None = None
@@ -57,6 +59,7 @@ class BaseNeuron:
                 device=device,
                 logger_attributes={
                     "hotkey": self.hotkey,
+                    "run_id": self.run_id,
                 },
             )
 
