@@ -180,6 +180,34 @@ class ModelManager:
 
         torch.nn.utils.clip_grad_norm_(parameters=self.model.parameters(), max_norm=split_grad_norm)
 
+    async def clip_pseudo_gradients(self, pseudo_gradients: torch.Tensor, eps: float = 1e-6):
+        """
+        Clips a flat pseudo gradient tensor
+        """
+        # Compute L2 norm of the pseudo gradient tensor
+        current_grad_norm = pseudo_gradients.norm(2).item()
+
+        total_model_params: int = sum(p.numel() for p in self.model.parameters())
+
+        max_grad_norm = self.model_metadata["grad_clip_norm"] * math.sqrt(
+            total_model_params / self.model_config["total_global_params"]
+        )
+
+        if current_grad_norm > max_grad_norm:
+            logger.debug(
+                f"Clipping pseudo gradients: Current grad norm: {current_grad_norm}, max grad norm: {max_grad_norm}"
+            )
+
+            # Scale down proportionally
+            scale = max_grad_norm / (current_grad_norm + eps)
+            pseudo_gradients = pseudo_gradients * scale
+        else:
+            logger.debug(
+                f"No need to clip pseudo gradients: Current grad norm: {current_grad_norm}, max grad norm: {max_grad_norm}"
+            )
+
+        return pseudo_gradients
+
     async def _load_model(self, layer: int):
         """
         Loads the model for the layer specified.
