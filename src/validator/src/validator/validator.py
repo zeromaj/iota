@@ -573,7 +573,6 @@ class Validator(BaseNeuron, HealthServerMixin, BaseValidator):
                 model_config=self.model_cfg.model_dump(),
                 model_metadata=self.model_metadata.model_dump(),
                 optimizer_state=None,
-                run_id=self.run_id,
             ):
                 raise Exception("Error setting up local model")
 

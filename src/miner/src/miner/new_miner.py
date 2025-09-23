@@ -537,24 +537,6 @@ class Miner(BaseNeuron, HealthServerMixin):
         """
         while True:
             try:
-                if not getattr(self, "registered_on_metagraph", True):
-                    logger.warning(
-                        f"Miner {self.hotkey[:8]} not registered on metagraph. Sleeping for 1 minute before retry..."
-                    )
-                    await asyncio.sleep(60)  # 60 seconds
-
-                    # Try to re-register using init_neuron method
-                    logger.info(f"🔄 Attempting to re-register miner {self.hotkey[:8]} on metagraph...")
-                    self.init_neuron(
-                        wallet_name=miner_settings.WALLET_NAME,
-                        wallet_hotkey=miner_settings.WALLET_HOTKEY,
-                        wallet=self.wallet,
-                    )
-                    if not getattr(self, "registered_on_metagraph", True):
-                        continue
-                    else:
-                        logger.success(f"✅ Miner {self.hotkey[:8]} registered successfully on metagraph")
-
                 if not common_settings.BITTENSOR:
                     await TestAPIClient.register_to_metagraph(hotkey=self.wallet.hotkey)
 
@@ -596,6 +578,10 @@ class Miner(BaseNeuron, HealthServerMixin):
                 logger.debug(f"Run flags for miner {self.hotkey[:8]}: {self.state_manager.run_flags}")
                 return response.model_cfg.model_dump(), response.model_metadata.model_dump()
 
+            except SpecVersionException as e:
+                logger.error(f"Spec version mismatch: {e}")
+                raise
+
             except Exception as e:
                 logger.exception(f"Error registering miner: {e}")
                 await asyncio.sleep(10)
@@ -624,6 +610,7 @@ class Miner(BaseNeuron, HealthServerMixin):
             raise Exception(f"Previous weights are None for miner {self.hotkey[:8]}")
 
         pseudo_gradients = previous_weights.to(torch.float32) - current_weights.to(torch.float32)
+        pseudo_gradients = await self.model_manager.clip_pseudo_gradients(pseudo_gradients)
         pseudo_gradients = pseudo_gradients.to(torch.bfloat16)
 
         # Log some stats about the pseudo gradients
@@ -717,6 +704,7 @@ class Miner(BaseNeuron, HealthServerMixin):
         except SpecVersionException:
             logger.error("Spec version mismatch. Please pull the latest code and restart the miner")
             raise
+
         except LayerStateException as e:
             logger.warning(f"Layer state exception: {e}")
 
@@ -825,14 +813,14 @@ class Miner(BaseNeuron, HealthServerMixin):
             logger.debug(f"Merging batch {batch} of {min(miner_settings.N_PARTITION_BATCHES, len(partitions))}")
 
             # Grab a batch of partitions to merge (no downloading yet)
-            merging_partitions: list[MergingPartition] = await get_partition_batch(
+            batch_partitions: list[MergingPartition] = await get_partition_batch(
                 batch_index=batch, partitions=partitions
             )
-            logger.debug(f"{len(merging_partitions)} batch partitions grabbed")
+            logger.debug(f"{len(batch_partitions)} batch partitions grabbed")
 
             # Download the weights for the batch (fills partitions.weights with a list of all pseudograds from all the other miners)
             merging_partitions: list[MergingPartition] = await download_pseudograds_for_partition_batch(
-                merging_partitions, filtered_metadata
+                batch_partitions=batch_partitions, filtered_metadata=filtered_metadata
             )
             logger.debug(f"{len(merging_partitions)} batch partitions downloaded successfully")
 
