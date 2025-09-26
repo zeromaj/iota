@@ -1,3 +1,4 @@
+import gzip
 from time import time
 from loguru import logger
 
@@ -7,6 +8,7 @@ from asyncio.exceptions import TimeoutError
 import aiohttp
 from common.utils.exceptions import NanInfWarning
 from common.models.miner_models import ChunkMetadata
+from common.models.run_flags import RUN_FLAGS
 from subnet.utils.vector_utils import check_for_nans_and_infs
 
 import torch
@@ -38,6 +40,8 @@ class AioHttpClientWithOpenSession:
 async def process_response(response: aiohttp.ClientResponse, dtype: torch.dtype, device: str = "cuda") -> torch.Tensor:
     """Process the response from aiohttp and return a tensor."""
     content = await response.read()
+    if RUN_FLAGS.compress_s3_files.isOn():
+        content = gzip.decompress(content)
     loaded_tensor = np.frombuffer(content, dtype=np.uint8)
     loaded_tensor = torch.tensor(loaded_tensor).view(dtype).to(device)
     return loaded_tensor
@@ -118,6 +122,9 @@ async def download_weights_or_optimizer_state(
                     if response.status > 299:
                         response.raise_for_status()
                     binary_data = await response.read()
+
+            if RUN_FLAGS.compress_s3_files.isOn():
+                binary_data = gzip.decompress(binary_data)
 
             section_numpy = np.frombuffer(binary_data, dtype=np.uint8)
             section_torch = torch.from_numpy(section_numpy.copy())

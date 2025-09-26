@@ -1,5 +1,6 @@
 import asyncio
 import json
+import gzip
 from urllib.parse import urlparse
 
 from typing import Literal, Optional
@@ -21,8 +22,10 @@ from common.models.api_models import (
 from common.utils.s3_utils import download_file
 from loguru import logger
 from subnet.miner_api_client import MinerAPIClient
+from common.models.run_flags import RUN_FLAGS
 
 
+# OBSOLETE
 async def get_start_and_end_indices(tensor_length: int, num_sections: int, target_section: int) -> tuple[int, int]:
     """Get the start and end indices for a tensor.
 
@@ -156,21 +159,24 @@ async def upload_file(
             if isinstance(file_upload_response, dict):
                 return file_upload_response
 
+        if RUN_FLAGS.compress_s3_files.isOn():
+            data = gzip.compress(data)
+
         # Upload data to presigned urls
         parts: list[dict] = await MinerAPIClient.upload_multipart_to_s3(
             urls=file_upload_response.urls, data=data, upload_id=file_upload_response.upload_id
         )
 
         # Complete file upload. Necessary to notify orchestrator that all parts have been uploaded.
-        complete_file_upload_response: CompleteFileUploadResponse | dict = (
-            await miner_api_client.complete_file_upload_request(
-                hotkey=hotkey,
-                file_upload_completion_request=FileUploadCompletionRequest(
-                    object_name=file_upload_response.object_name,
-                    upload_id=file_upload_response.upload_id,
-                    parts=parts,
-                ),
-            )
+        complete_file_upload_response: (
+            CompleteFileUploadResponse | dict
+        ) = await miner_api_client.complete_file_upload_request(
+            hotkey=hotkey,
+            file_upload_completion_request=FileUploadCompletionRequest(
+                object_name=file_upload_response.object_name,
+                upload_id=file_upload_response.upload_id,
+                parts=parts,
+            ),
         )
 
         if isinstance(complete_file_upload_response, dict):
@@ -212,6 +218,9 @@ async def upload_tensor(
     tensor_cpu = tensor.detach().to("cpu").to(torch.bfloat16).contiguous()
     data = tensor_cpu.view(torch.uint8).numpy().tobytes()
 
+    if RUN_FLAGS.compress_s3_files.isOn():
+        data = gzip.compress(data)
+
     try:
         parts: list[dict] = await MinerAPIClient.upload_multipart_to_s3(
             urls=initiate_response.urls, data=data, upload_id=initiate_response.upload_id
@@ -232,6 +241,7 @@ async def upload_tensor(
         raise
 
 
+# OBSOLETE
 def extract_filename_from_url(url):
     """
     Extract the filename from a URL, handling both regular paths and query parameters.

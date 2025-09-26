@@ -41,6 +41,7 @@ class DatasetMetadata(BaseModel):
     dataset_name: str | None = None
     shuffle_dataset: bool | None = None
     sequence_length: int | None = None
+    mini_batch_size: int | None = None
 
 
 class ModelMetadata(BaseModel):

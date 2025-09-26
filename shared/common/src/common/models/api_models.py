@@ -190,6 +190,10 @@ class SubnetScores(BaseModel):
     burn_factor: float
 
 
+class GetActivationRequest(BaseModel):
+    n_activations: int = 1
+
+
 class RegisterMinerRequest(BaseModel):
     run_id: str
 
