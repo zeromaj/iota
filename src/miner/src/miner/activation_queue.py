@@ -98,7 +98,7 @@ class ActivationQueue:
             # Keep cache clean - TODO: this should probably not be part of the activation queue
             self._state_manager.check_if_timeout(timeout=common_settings.ACTIVATION_CACHE_TIMEOUT)
 
-            queue_slots = common_settings.MAX_ACTIVATION_QUEUE_SIZE - len(self._queue)
+            queue_slots = miner_settings.MAX_ACTIVATION_QUEUE_SIZE - len(self._queue)
             if queue_slots <= 0:
                 await asyncio.sleep(0.1)
                 continue

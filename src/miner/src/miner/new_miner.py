@@ -245,7 +245,7 @@ class Miner(BaseNeuron, HealthServerMixin):
         )
 
         # Check if any of the activations in the cache have timed out and remove them
-        if len(self.state_manager.activation_cache) == common_settings.MAX_ACTIVATION_CACHE_SIZE:
+        if len(self.state_manager.activation_cache) == miner_settings.ACTIVATION_CACHE_SIZE:
             self.state_manager.check_if_timeout(timeout=common_settings.ACTIVATION_CACHE_TIMEOUT)
 
         response: list[ActivationResponse] | dict = await self.miner_api_client.get_activations(
@@ -290,7 +290,7 @@ class Miner(BaseNeuron, HealthServerMixin):
         """
         if await self.state_manager.activation_cache_is_full(miner_api_client=self.miner_api_client):
             logger.warning(
-                f"⚠️ Miner {self.hotkey[:8]} is out of cache ({len(self.state_manager.activation_cache)}/{common_settings.MAX_ACTIVATION_CACHE_SIZE}), skipping forward pass until backwards have been performed"
+                f"⚠️ Miner {self.hotkey[:8]} is out of cache ({len(self.state_manager.activation_cache)}/{miner_settings.ACTIVATION_CACHE_SIZE}), skipping forward pass until backwards have been performed"
             )
             await asyncio.sleep(1)
             return
