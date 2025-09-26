@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from common import settings as common_settings
 from subnet.miner_api_client import MinerAPIClient
+from miner import settings as miner_settings
 
 
 class ActivationData(BaseModel):
@@ -54,7 +55,7 @@ class StateManager(BaseModel):
                 logger.warning(f"Activation {activation_id} not found in cache")
 
     async def activation_cache_is_full(self, miner_api_client: MinerAPIClient) -> bool:
-        if ooc := len(self.activation_cache) >= common_settings.MAX_ACTIVATION_CACHE_SIZE:
+        if ooc := len(self.activation_cache) >= miner_settings.ACTIVATION_CACHE_SIZE:
             logger.info(
                 f"Miner {self.wallet.hotkey} cache full with {len(self.activation_cache)} activations: {self.activation_cache.keys()}"
             )
@@ -63,10 +64,10 @@ class StateManager(BaseModel):
             self.sync_activation_assignments(miner_api_client=miner_api_client)
 
             # Update cache_is_full status after cleanup
-            ooc = len(self.activation_cache) >= common_settings.MAX_ACTIVATION_CACHE_SIZE
+            ooc = len(self.activation_cache) >= miner_settings.ACTIVATION_CACHE_SIZE
 
             logger.info(
-                f"Miner {self.wallet.hotkey} cache status: {len(self.activation_cache)}/{common_settings.MAX_ACTIVATION_CACHE_SIZE} activations cached, out_of_cache: {ooc}"
+                f"Miner {self.wallet.hotkey} cache status: {len(self.activation_cache)}/{miner_settings.ACTIVATION_CACHE_SIZE} activations cached, out_of_cache: {ooc}"
             )
             logger.debug(f"Cache: {[(a.activation_id, a.direction) for a in self.activation_cache.values()]}")
         return ooc

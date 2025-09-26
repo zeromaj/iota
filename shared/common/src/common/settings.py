@@ -53,17 +53,12 @@ MAX_PART_SIZE = 100 * 1024 * 1024  # 100MB
 MAX_RETRIES = 3
 RETRY_DELAY = 1.0  # seconds
 ACTIVATION_CACHE_TIMEOUT = 60 * 20
-MAX_ACTIVATION_CACHE_SIZE = 8  # should probably match MINI_BATCH_ACCUMULATION_COUNT
-# Cache is in-process forwards so we want queue to be at least the size of the cache + some buffer (e.g. 15)
-# bcs we want it to hold all the backwards for the cache (10) + a buffer set of next forwards (5)
-MAX_ACTIVATION_QUEUE_SIZE = 16
-assert (
-    MAX_ACTIVATION_QUEUE_SIZE > MAX_ACTIVATION_CACHE_SIZE
-), "MAX_ACTIVATION_QUEUE_SIZE must be greater than MAX_ACTIVATION_CACHE_SIZE to allow for backwards activations"
-
 LRU_CACHE_TIMEOUT = 20  # seconds
+MAX_NUM_MINERS = int(
+    os.getenv("MAX_NUM_MINERS", 9 if MOCK else 70)
+)  # stupid name for a setting that controls number of partitions
 
-# Model Training Settings
+# Model Training Settings - not for miner's to change
 HF_TOKEN = os.getenv("HF_TOKEN")
 DATASET_NAME = "HuggingFaceFW/fineweb"
 SHUFFLE_DATASET = True
@@ -79,14 +74,15 @@ LR_CONST_STEPS = 90_999_999
 LR_TAIL_STEPS_FRAC = 0.02
 LR_FINAL_FACTOR = 0.10
 LR_SAW_CYCLE_LENGTH = 1000
+NESTEROV_LEARNING_RATE = 0.7
+NESTEROV_MOMENTUM = 0.9
 
+
+# Activation settings - not for miner's to change
+MAX_ACTIVATION_CACHE_SIZE = 8  # ideally match MINI_BATCH_ACCUMULATION_COUNT
 MINI_BATCH_SIZE = 8
 MINI_BATCH_ACCUMULATION_COUNT = 8
 SEQUENCE_LENGTH = 800
 
 # Epoch level sync settings
 DOWNLOAD_BATCH_SIZE = 50
-
-MAX_NUM_MINERS = int(os.getenv("MAX_NUM_MINERS", 9 if MOCK else 70))
-NESTEROV_LEARNING_RATE = 0.7
-NESTEROV_MOMENTUM = 0.9
