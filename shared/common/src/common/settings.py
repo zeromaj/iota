@@ -16,7 +16,7 @@ LOG_FILE_ENABLED = os.getenv("LOG_FILE_ENABLED") == "True"
 TEST_MODE = os.getenv("TEST_MODE") == "True"
 
 # Bittensor settings
-__SPEC_VERSION__ = 20006
+__SPEC_VERSION__ = 20007
 __VALIDATOR_SPEC_VERSION__ = 4065
 BITTENSOR = os.getenv("BITTENSOR") == "True"
 MAX_NUM_PARTS = int(os.getenv("MAX_NUM_PARTS", 10000))
@@ -53,7 +53,14 @@ MAX_PART_SIZE = 100 * 1024 * 1024  # 100MB
 MAX_RETRIES = 3
 RETRY_DELAY = 1.0  # seconds
 ACTIVATION_CACHE_TIMEOUT = 60 * 20
-MAX_ACTIVATION_CACHE_SIZE = 2
+MAX_ACTIVATION_CACHE_SIZE = 8  # should probably match MINI_BATCH_ACCUMULATION_COUNT
+# Cache is in-process forwards so we want queue to be at least the size of the cache + some buffer (e.g. 15)
+# bcs we want it to hold all the backwards for the cache (10) + a buffer set of next forwards (5)
+MAX_ACTIVATION_QUEUE_SIZE = 16
+assert (
+    MAX_ACTIVATION_QUEUE_SIZE > MAX_ACTIVATION_CACHE_SIZE
+), "MAX_ACTIVATION_QUEUE_SIZE must be greater than MAX_ACTIVATION_CACHE_SIZE to allow for backwards activations"
+
 LRU_CACHE_TIMEOUT = 20  # seconds
 
 # Model Training Settings

@@ -191,9 +191,9 @@ async def get_weight_partition_info(
     Returns:
         tuple[list[SubmittedWeightsPresigned], list[int]]: The weight partition info and the partition ids
     """
-    weight_path_per_layer: list[
-        SubmittedWeightsAndOptimizerPresigned
-    ] | dict = await miner_api_client.get_weight_path_per_layer()
+    weight_path_per_layer: (
+        list[SubmittedWeightsAndOptimizerPresigned] | dict
+    ) = await miner_api_client.get_weight_path_per_layer()
 
     if not weight_path_per_layer:
         raise WeightPartitionException("Unknown error getting weight path per layer")
@@ -208,6 +208,7 @@ async def get_weight_partition_info(
     return weight_path_per_layer, [MinerPartition(**p) for p in partitions]
 
 
+# OBSOLETE
 def get_total_optimizer_state_size(optimizer):
     state_dict = optimizer.state_dict()
     total_size = 0

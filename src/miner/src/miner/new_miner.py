@@ -20,7 +20,7 @@ from miner.utils.partition_merging import (
     get_weight_partition_info,
 )
 from miner import settings as miner_settings
-from miner.state_manager import CacheEntry, StateManager
+from miner.state_manager import ActivationData, StateManager
 from miner.utils.utils import (
     create_metadata,
     upload_file,
@@ -32,6 +32,7 @@ from common import settings as common_settings
 from common.models.api_models import (
     ActivationResponse,
     CompleteFileUploadResponse,
+    GetActivationRequest,
     GetTargetsRequest,
     LossReportRequest,
     MinerRegistrationResponse,
@@ -54,6 +55,7 @@ from common.utils.exceptions import (
 )
 from common.utils.partitions import MinerPartition
 from common.utils.shared_states import LayerPhase
+from common.models.run_flags import RUN_FLAGS  # noqa: F401
 from subnet.base.base_neuron import BaseNeuron
 from subnet.miner_api_client import MinerAPIClient
 from subnet.model.utils import _clean_gpu_memory, compute_loss
@@ -65,6 +67,7 @@ from subnet.utils.partition_utils import (
 )
 from subnet.utils.s3_torch import download_tensor
 from subnet.utils.vector_utils import check_for_nans_and_infs
+from miner.training import TrainingPhase
 
 
 class Miner(BaseNeuron, HealthServerMixin):
@@ -76,7 +79,11 @@ class Miner(BaseNeuron, HealthServerMixin):
         self.partitions_submitted: bool = False
         self.miner_api_client: MinerAPIClient = MinerAPIClient(hotkey=self.wallet.hotkey)
         self.need_to_pull_weights = True
-        # test
+        self.training_phase: TrainingPhase = TrainingPhase(
+            miner_api_client=self.miner_api_client,
+            state_manager=self.state_manager,
+            model_manager=self.model_manager,
+        )
 
     async def run(self):
         await self.reset_miner_state()
@@ -133,7 +140,12 @@ class Miner(BaseNeuron, HealthServerMixin):
                         # Need to ensure that we don't pull weights again in this loop
                         self.need_to_pull_weights = False
 
-                        await self.step()
+                        if RUN_FLAGS.async_activation_cache.isOn():
+                            self.weights_submitted = False
+                            self.partitions_submitted = False
+                            await self.training_phase.run()
+                        else:
+                            await self.step()
 
                         self.weights_submitted = False
                         self.partitions_submitted = False
@@ -229,23 +241,41 @@ class Miner(BaseNeuron, HealthServerMixin):
             f"🔄 Miner {self.hotkey[:8]} step | Layer: {self.state_manager.layer} \n"
             f"is_training: {self.miner_api_client.layer_state} \n"
             f"backwards_since_reset: {self.state_manager.backwards_since_reset} \n"
-            f"len(cache): {len(self.state_manager.cache)}"
+            f"len(activation_cache): {len(self.state_manager.activation_cache)}"
         )
 
         # Check if any of the activations in the cache have timed out and remove them
-        if len(self.state_manager.cache) == common_settings.MAX_ACTIVATION_CACHE_SIZE:
+        if len(self.state_manager.activation_cache) == common_settings.MAX_ACTIVATION_CACHE_SIZE:
             self.state_manager.check_if_timeout(timeout=common_settings.ACTIVATION_CACHE_TIMEOUT)
 
-        response: ActivationResponse | dict = await self.miner_api_client.get_activation()
-        if not response:
+        response: list[ActivationResponse] | dict = await self.miner_api_client.get_activations(
+            get_activation_request=GetActivationRequest(n_activations=5)
+        )
+        if response is None:
             raise Exception("Error getting activation")
 
-        if response.direction == "forward":
-            await self.forward(response)
-        elif response.direction == "backward":
-            await self.backward(response)
+        tasks = []
+        for activation in response:
+            if activation.direction == "forward":
+                tasks.append(self.forward(activation))
+            elif activation.direction == "backward":
+                tasks.append(self.backward(activation))
+        await asyncio.gather(*tasks)
 
-    async def forward(self, activation: ActivationResponse | None = None):
+        if self.state_manager.backwards_since_last_optim >= common_settings.MINI_BATCH_ACCUMULATION_COUNT:
+            logger.info(
+                f"🔄 Miner {self.hotkey[:8]} performing local optimization step after {common_settings.MINI_BATCH_ACCUMULATION_COUNT} backward passes"
+            )
+            learning_rate = await self.miner_api_client.get_learning_rate()
+            await self.model_manager.local_optimization_step(learning_rate=learning_rate)
+            self.state_manager.reset_optimization_counter()
+
+            self.state_manager.local_optimization_steps += 1
+            logger.info(
+                f"✅ Miner {self.hotkey[:8]} completed local optimization step #{self.state_manager.local_optimization_steps}"
+            )
+
+    async def forward(self, activation: ActivationResponse):
         """
         Performs the forward pass.
 
@@ -258,9 +288,9 @@ class Miner(BaseNeuron, HealthServerMixin):
         - Reporting the loss to the API
         - Performing the backward pass
         """
-        if await self.state_manager.out_of_cache(miner_api_client=self.miner_api_client):
+        if await self.state_manager.activation_cache_is_full(miner_api_client=self.miner_api_client):
             logger.warning(
-                f"⚠️ Miner {self.hotkey[:8]} is out of cache ({len(self.state_manager.cache)}/{common_settings.MAX_ACTIVATION_CACHE_SIZE}), skipping forward pass until backwards have been performed"
+                f"⚠️ Miner {self.hotkey[:8]} is out of cache ({len(self.state_manager.activation_cache)}/{common_settings.MAX_ACTIVATION_CACHE_SIZE}), skipping forward pass until backwards have been performed"
             )
             await asyncio.sleep(1)
             return
@@ -303,9 +333,11 @@ class Miner(BaseNeuron, HealthServerMixin):
             layer=self.state_manager.layer, input_activations=input_activations
         )
 
-        self.state_manager.add_to_cache(
-            activation.activation_id,
-            CacheEntry(
+        await self.state_manager.add_to_activation_cache(
+            activation_id=activation.activation_id,
+            data=ActivationData(
+                activation_id=activation.activation_id,
+                direction=activation.direction,
                 input_activations=input_activations,
                 output_activations=output_activations,
                 state=state,
@@ -360,7 +392,7 @@ class Miner(BaseNeuron, HealthServerMixin):
         )
 
         # Check if activation is in cache
-        if activation.activation_id not in self.state_manager.cache:
+        if activation.activation_id not in self.state_manager.activation_cache:
             logger.warning(f"⚠️ Activation {activation.activation_id} not found in cache, skipping backward pass")
             return
         activation_grads = None
@@ -387,7 +419,7 @@ class Miner(BaseNeuron, HealthServerMixin):
                 )
 
         # Get activations from cache and move back to GPU
-        cached_activations = self.state_manager.cache[activation.activation_id]
+        cached_activations = self.state_manager.activation_cache[activation.activation_id]
 
         # Move to GPU and enable gradients only for floating point tensors
         input_activations: torch.Tensor = cached_activations.input_activations.to(miner_settings.DEVICE)
@@ -448,24 +480,10 @@ class Miner(BaseNeuron, HealthServerMixin):
             ),
         )
         # Remove from cache
-        self.state_manager.remove_from_cache(activation.activation_id)
+        await self.state_manager.remove_from_activation_cache(activation.activation_id)
 
         # Check if we need to perform a local optimization step
-        if self.state_manager.increment_backward_count():
-            logger.info(
-                f"🔄 Miner {self.hotkey[:8]} performing local optimization step after {common_settings.MINI_BATCH_ACCUMULATION_COUNT} backward passes"
-            )
-            learning_rate = await self.miner_api_client.get_learning_rate()
-            await self.model_manager.local_optimization_step(learning_rate=learning_rate)
-            self.state_manager.reset_optimization_counter()
-
-            # Remove all activations from cache
-            self.state_manager.cache.clear()
-
-            self.state_manager.local_optimization_steps += 1
-            logger.info(
-                f"✅ Miner {self.hotkey[:8]} completed local optimization step #{self.state_manager.local_optimization_steps}"
-            )
+        self.state_manager.increment_backward_count()
 
         logger.info(
             f"✅ Successfully completed BACKWARD pass for activation {activation.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
@@ -487,7 +505,7 @@ class Miner(BaseNeuron, HealthServerMixin):
         )
 
         # Target sample is the initial activations
-        # Target sample is the initial activations
+        # TODO: can we do this async with the queue?
         targets = await download_sample(download_url=initial_activations_path, tokenizer=self.model_manager.tokenizer)
         logger.debug(f"Downloaded targets: {targets}")
         logger.debug(f"Targets shape: {targets.shape}")
@@ -509,9 +527,11 @@ class Miner(BaseNeuron, HealthServerMixin):
         )
 
         # Update cache with loss before attempting to report it to handle API errors gracefully
-        self.state_manager.add_to_cache(
-            input_activation_response.activation_id,
-            CacheEntry(
+        await self.state_manager.add_to_activation_cache(
+            activation_id=input_activation_response.activation_id,
+            data=ActivationData(
+                activation_id=input_activation_response.activation_id,
+                direction=input_activation_response.direction,
                 input_activations=input_activations,
                 output_activations=loss,
                 state=state,
@@ -570,12 +590,14 @@ class Miner(BaseNeuron, HealthServerMixin):
                 self.state_manager.run_id = response.run_id
                 self.run_id = response.run_id
                 self.model_manager.epoch_on_registration = current_epoch
-                self.state_manager.run_flags = response.run_flags
+
+                global RUN_FLAGS
+                RUN_FLAGS = response.run_flags
 
                 logger.success(
                     f"✅ Miner {self.hotkey[:8]} registered successfully in layer {self.state_manager.layer} on training epoch {current_epoch}"
                 )
-                logger.debug(f"Run flags for miner {self.hotkey[:8]}: {self.state_manager.run_flags}")
+                logger.debug(f"Run flags for miner {self.hotkey[:8]}: {RUN_FLAGS}")
                 return response.model_cfg.model_dump(), response.model_metadata.model_dump()
 
             except SpecVersionException as e:

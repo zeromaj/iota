@@ -1,5 +1,6 @@
 from typing import Any
 from common.models.api_models import (
+    GetActivationRequest,
     RunInfo,
     ActivationResponse,
     CompleteFileUploadResponse,
@@ -67,13 +68,16 @@ class MinerAPIClient(CommonAPIClient):
             logger.error(f"Error getting layer state: {e}")
             raise
 
-    async def get_activation(self) -> ActivationResponse | dict:
+    async def get_activations(self, get_activation_request: GetActivationRequest) -> list[ActivationResponse] | dict:
         try:
             response = await CommonAPIClient.orchestrator_request(
-                method="GET", path="/miner/get_activation", hotkey=self.hotkey
+                method="GET",
+                path="/miner/get_activations",
+                hotkey=self.hotkey,
+                body=get_activation_request.model_dump(),
             )
             parsed_response = self.parse_response(response)
-            return ActivationResponse.model_validate(parsed_response)
+            return [ActivationResponse.model_validate(parsed_response) for parsed_response in parsed_response]
         except Exception as e:
             logger.error(f"Error getting activation: {e}")
             raise

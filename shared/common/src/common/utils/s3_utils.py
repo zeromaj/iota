@@ -1,9 +1,11 @@
 import asyncio
+import gzip
 import math
 from typing import Any
 
 import aiohttp
 from loguru import logger
+from common.models.run_flags import RUN_FLAGS
 
 
 async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries: int = 3) -> list[dict]:
@@ -121,7 +123,10 @@ async def download_file(presigned_url: str, max_retries: int = 3):
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(presigned_url) as response:
                     response.raise_for_status()
-                    return await response.read()
+                    if RUN_FLAGS.compress_s3_files.isOn():
+                        return gzip.decompress(await response.read())
+                    else:
+                        return await response.read()
         except aiohttp.ClientResponseError as e:
             if e.status >= 500 or e.status == 429:
                 if attempt < max_retries:
