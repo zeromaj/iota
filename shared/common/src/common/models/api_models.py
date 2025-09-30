@@ -191,7 +191,7 @@ class SubnetScores(BaseModel):
 
 
 class GetActivationRequest(BaseModel):
-    n_activations: int = 1
+    n_fwd_activations: int = 1
 
 
 class RegisterMinerRequest(BaseModel):

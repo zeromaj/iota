@@ -30,9 +30,10 @@ async def get_chunk_metadata_for_all_partitions(
         7: ChunkMetadata(...),
     }
     """
+    weight_metadata: dict | None = None
     try:
         # Download both weight and optimizer state metadata
-        weight_metadata: dict = await download_metadata(
+        weight_metadata = await download_metadata(
             metadata_path=submitted_weights_and_optimizer.weight_metadata_path_presigned
         )
         if not weight_metadata:

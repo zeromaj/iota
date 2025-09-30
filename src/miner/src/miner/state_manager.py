@@ -57,7 +57,7 @@ class StateManager(BaseModel):
     async def activation_cache_is_full(self, miner_api_client: MinerAPIClient) -> bool:
         if ooc := len(self.activation_cache) >= miner_settings.ACTIVATION_CACHE_SIZE:
             logger.info(
-                f"Miner {self.wallet.hotkey} cache full with {len(self.activation_cache)} activations: {self.activation_cache.keys()}"
+                f"Miner {self.wallet.hotkey.ss58_address[:8]} cache full with {len(self.activation_cache)} activations: {self.activation_cache.keys()}"
             )
 
             # Clean up inactive activations
@@ -67,7 +67,7 @@ class StateManager(BaseModel):
             ooc = len(self.activation_cache) >= miner_settings.ACTIVATION_CACHE_SIZE
 
             logger.info(
-                f"Miner {self.wallet.hotkey} cache status: {len(self.activation_cache)}/{miner_settings.ACTIVATION_CACHE_SIZE} activations cached, out_of_cache: {ooc}"
+                f"Miner {self.wallet.hotkey.ss58_address[:8]} cache status: {len(self.activation_cache)}/{miner_settings.ACTIVATION_CACHE_SIZE} activations cached, out_of_cache: {ooc}"
             )
             logger.debug(f"Cache: {[(a.activation_id, a.direction) for a in self.activation_cache.values()]}")
         return ooc
@@ -112,7 +112,6 @@ class StateManager(BaseModel):
 
         # we can't process backwards activations on forwards processed before the optimization step
         self.activation_cache.clear()
-        self.activation_cache = {}
 
         # Add explicit GPU cleanup
         if torch.cuda.is_available():
