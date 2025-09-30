@@ -41,22 +41,27 @@ class TrainingPhase:
         await self.activation_queue.start_activation_fetcher(model_manager=self.model_manager)
 
         while True:
-            direction = await self.activation_queue.peek_next_activation_direction()
+            # Check if training phase is complete
+            await self.activation_queue.check_if_training_is_complete()
+
             if (
-                direction is not None
-                and direction == "forward"
+                await self.activation_queue.next_activation_is_forward()
                 and await self.state_manager.activation_cache_is_full(miner_api_client=self.miner_api_client)
             ):
-                logger.info("Activation cache is full. Waiting for backwards activations.")
-                await asyncio.sleep(0.1)
+                logger.info(
+                    f"Activation cache is full. Waiting for backwards activations: {len(self.state_manager.activation_cache)}"
+                )
+                await asyncio.sleep(1)
                 continue
 
+            # Get next activation to process
             activation = await self.activation_queue.get_activation()
 
-            if activation.direction == "forward":
-                await self.forward(activation)
-            elif activation.direction == "backward":
-                await self.backward(activation)
+            with logger.contextualize(activation_id=activation.activation_id):
+                if activation.direction == "forward":
+                    await self.forward(activation)
+                elif activation.direction == "backward":
+                    await self.backward(activation)
             # Loop until LayerStateException is raised by `get_activation`
 
     async def forward(self, activation_data: ActivationData):
@@ -125,7 +130,7 @@ class TrainingPhase:
                 direction="forward",
             ),
         )
-        logger.info(
+        logger.success(
             f"✅ Successfully completed FORWARD pass for activation {activation_data.activation_id} on layer {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
         )
 
@@ -213,15 +218,12 @@ class TrainingPhase:
             await self.model_manager.local_optimization_step(learning_rate=learning_rate)
             self.state_manager.reset_optimization_counter()
 
-            # Remove all activations from cache
-            self.state_manager.activation_cache.clear()
-
             self.state_manager.local_optimization_steps += 1
-            logger.info(
+            logger.success(
                 f"✅ Miner {self.hotkey[:8]} completed local optimization step #{self.state_manager.local_optimization_steps}"
             )
 
-        logger.info(
+        logger.success(
             f"✅ Successfully completed BACKWARD pass for activation {activation_data.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
         )
 

@@ -94,7 +94,11 @@ class Miner(BaseNeuron, HealthServerMixin):
 
         while True:
             try:
-                with logger.contextualize(hotkey=self.hotkey[:8], layer=self.state_manager.layer):
+                with logger.contextualize(
+                    hotkey=self.hotkey[:8],
+                    run_id=self.state_manager.run_id,
+                    layer=self.state_manager.layer,
+                ):
                     if not await CommonAPIClient.check_orchestrator_health(hotkey=self.wallet.hotkey):
                         logger.info(
                             f"🔄 Orchestrator health check failed for miner {self.wallet.hotkey.ss58_address[:8]}"
@@ -249,7 +253,7 @@ class Miner(BaseNeuron, HealthServerMixin):
             self.state_manager.check_if_timeout(timeout=common_settings.ACTIVATION_CACHE_TIMEOUT)
 
         response: list[ActivationResponse] | dict = await self.miner_api_client.get_activations(
-            get_activation_request=GetActivationRequest(n_activations=5)
+            get_activation_request=GetActivationRequest(n_fwd_activations=5)
         )
         if response is None:
             raise Exception("Error getting activation")
