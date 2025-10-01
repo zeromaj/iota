@@ -343,7 +343,7 @@ class Miner(BaseNeuron, HealthServerMixin):
                 activation_id=activation.activation_id,
                 direction=activation.direction,
                 input_activations=input_activations,
-                output_activations=output_activations,
+                output_activations=None,
                 state=state,
                 upload_time=time.time(),
             ),
@@ -427,9 +427,11 @@ class Miner(BaseNeuron, HealthServerMixin):
 
         # Move to GPU and enable gradients only for floating point tensors
         input_activations: torch.Tensor = cached_activations.input_activations.to(miner_settings.DEVICE)
-        output_activations: torch.Tensor = cached_activations.output_activations.to(miner_settings.DEVICE)
 
-        state = cached_activations.state
+        # Recompute activations
+        output_activations, recomputed_state = await self.model_manager._forward(
+            layer=self.state_manager.layer, input_activations=input_activations
+        )
 
         logger.info(
             f"output activations before backward with shape {output_activations.shape} for {self.hotkey[:8]} on layer {self.state_manager.layer}"
@@ -438,7 +440,7 @@ class Miner(BaseNeuron, HealthServerMixin):
             layer=self.state_manager.layer,
             output_activations=output_activations,
             activation_grads=activation_grads,
-            state=state,
+            state=recomputed_state,
         )
 
         self.state_manager.backwards_since_reset += 1

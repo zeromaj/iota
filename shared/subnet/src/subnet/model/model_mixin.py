@@ -134,15 +134,21 @@ class ModelManager:
             logger.error(f"Error loading model: {e}")
             raise
 
-    async def _forward(self, layer: int, input_activations: torch.Tensor):
+    async def _forward(self, layer: int, input_activations: torch.Tensor) -> tuple[torch.Tensor, dict]:
         if layer > 0:
             input_activations.requires_grad_(True)
-        self.model.to(self.device)
-        output_activations: tuple[torch.Tensor, dict] = self.model(input_activations.to(self.device))
+
+        input_activations_gpu = input_activations.to(self.device)
+
+        output_activations, state = self.model(input_activations_gpu)
         logger.info(
-            f"output activations with shape {output_activations[0].shape} for {self.logger_attributes['hotkey'][:8]} on layer {layer}"
+            f"output activations with shape {output_activations.shape} for {self.logger_attributes['hotkey'][:8]} on layer {layer}"
         )
-        return output_activations
+
+        del input_activations_gpu
+        torch.cuda.empty_cache()
+
+        return output_activations, state
 
     async def _backward(
         self,
@@ -151,24 +157,39 @@ class ModelManager:
         activation_grads: torch.Tensor,
         state: dict,
     ):
+        # Temporary device copies
+        temp_output_activations = (
+            output_activations.to(self.device, non_blocking=True)
+            if not output_activations.is_cuda
+            else output_activations
+        )
+
+        temp_activation_grads = (
+            activation_grads.to(self.device, non_blocking=True) if not activation_grads.is_cuda else activation_grads
+        )
+
         # If this is the last layer, then output_activations is the loss
         if layer == self.model_metadata["n_splits"] - 1:
             try:
                 check_for_nans_and_infs(
-                    output_activations,
+                    temp_output_activations,
                     f"output activations for miner {self.logger_attributes['hotkey'][:8]}",
                     exception_type=NanInfException,
                 )
-                output_activations.backward()
+                temp_output_activations.backward()
             except RuntimeError as e:
                 logger.error(f"Error during backward step: {e}")
                 raise
         else:
             try:
-                self.model.backward(output_activations, activation_grads, state)
+                self.model.backward(temp_output_activations, temp_activation_grads, state)
             except RuntimeError as e:
                 logger.error(f"Error during backward step: {e}")
                 raise
+
+        # Delete the references to the GPU.
+        del temp_output_activations, temp_activation_grads
+        torch.cuda.empty_cache()
 
     async def clip_gradients(self):
         total_model_params: int = sum(p.numel() for p in self.model.parameters())
@@ -231,6 +252,9 @@ class ModelManager:
                 device=self.device,
                 seed=42,
             )
+
+            self.model = self.model.to(self.device)
+
             # put the model in train mode
             self.model.train()
 

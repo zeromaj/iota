@@ -215,7 +215,7 @@ class ActivationQueue:
                     input_activations = await asyncio.wait_for(
                         download_tensor(
                             path=activation_response.presigned_download_url,
-                            device=miner_settings.DEVICE,
+                            device="cpu",
                         ),
                         timeout=10,  # TODO: this value should change based on activation size
                     )
