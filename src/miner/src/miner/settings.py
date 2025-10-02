@@ -31,11 +31,11 @@ PREVIOUS_WEIGHTS = os.getenv("MODEL_DIR", "./weights")
 # bcs we want it to hold all the backwards for the cache (10) + a buffer set of next forwards (5)
 # Miners: Increases these to process more activations at once. Decrease these if you're getting CUDA out of memory errors.
 # the max cache size is enforced in the backend by not sending you more forward activations until you have completed some backwards
-ACTIVATION_CACHE_SIZE = int(os.getenv("ACTIVATION_CACHE_SIZE", "4"))
+ACTIVATION_CACHE_SIZE = int(os.getenv("ACTIVATION_CACHE_SIZE", "2"))
 assert (
     ACTIVATION_CACHE_SIZE <= common_settings.MAX_ACTIVATION_CACHE_SIZE
 ), "ACTIVATION_CACHE_SIZE must be less than or equal to MAX_ACTIVATION_CACHE_SIZE"
-MAX_ACTIVATION_QUEUE_SIZE = int(os.getenv("MAX_ACTIVATION_QUEUE_SIZE", "8"))
+MAX_ACTIVATION_QUEUE_SIZE = int(os.getenv("MAX_ACTIVATION_QUEUE_SIZE", "3"))
 assert (
     MAX_ACTIVATION_QUEUE_SIZE > ACTIVATION_CACHE_SIZE
 ), "MAX_ACTIVATION_QUEUE_SIZE must be greater than ACTIVATION_CACHE_SIZE to allow for backwards activations"
