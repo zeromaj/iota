@@ -3,9 +3,10 @@ from loguru import logger
 
 from common import settings as common_settings
 from common.utils.s3_utils import download_file
+from miner import settings as miner_settings
 
 
-async def download_sample(download_url: str, tokenizer, device="cpu") -> torch.Tensor:
+async def download_sample(download_url: str, tokenizer) -> torch.Tensor:
     """
     Downloads the sample from the given URL and returns it as a tensor.
 
@@ -27,9 +28,9 @@ async def download_sample(download_url: str, tokenizer, device="cpu") -> torch.T
             raise Exception(f"Failed to decode sample as utf-8 (and gzip fallback failed): {e}")
 
     if common_settings.MOCK:
-        return torch.randn(size=(common_settings.MINI_BATCH_SIZE, 100), dtype=torch.bfloat16).to(device)
+        return torch.randn(size=(common_settings.MINI_BATCH_SIZE, 100), dtype=torch.bfloat16).to("cpu")
 
-    sample = torch.tensor(tokenizer.encode(text)).to(device)
+    sample = torch.tensor(tokenizer.encode(text)).to(miner_settings.DEVICE)
     if len(sample) < common_settings.SEQUENCE_LENGTH * common_settings.MINI_BATCH_SIZE:
         raise Exception(
             f"Sample is too short: {len(sample)} < {common_settings.SEQUENCE_LENGTH * common_settings.MINI_BATCH_SIZE}"
