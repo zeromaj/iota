@@ -61,7 +61,7 @@ class StateManager(BaseModel):
             )
 
             # Clean up inactive activations
-            self.sync_activation_assignments(miner_api_client=miner_api_client)
+            await self.sync_activation_assignments(miner_api_client=miner_api_client)
 
             # Update cache_is_full status after cleanup
             ooc = len(self.activation_cache) >= miner_settings.ACTIVATION_CACHE_SIZE
