@@ -28,7 +28,6 @@ def compute_loss(
     vocab_size: int,
     pad_token_id: int,
     pack: bool,
-    device: str,
 ):
     """
     Compute the loss for the given logits and batch.
@@ -48,13 +47,7 @@ def compute_loss(
         loss = logits.sum()
         return loss
 
-    # Move tensors to CPU for loss computation to save GPU memory
-    # Loss computation is relatively fast on CPU and saves ~1.5GB GPU memory
-    if device == "cpu":
-        logits = logits.to(device)
-        targets = targets.to(device)
-
-    # Shift the logits and labels to compute the loss on CPU
+    # Shift the logits and labels to compute the loss.
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = targets[..., 1:].contiguous()
 
@@ -75,10 +68,7 @@ def compute_loss(
     loss_fct = torch.nn.CrossEntropyLoss()
     shift_logits = shift_logits.view(-1, vocab_size)
     shift_labels = shift_labels.view(-1)
-
-    # Compute loss
-    loss: torch.Tensor = loss_fct(shift_logits, shift_labels)
-    loss = loss.to(device)
+    loss = loss_fct(shift_logits, shift_labels)
 
     return loss
 

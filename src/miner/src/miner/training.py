@@ -21,10 +21,6 @@ from subnet.model.model_mixin import ModelManager
 from miner.activation_queue import ActivationQueue
 from subnet.model.utils import compute_loss
 
-import os
-
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 
 class TrainingPhase:
     def __init__(
@@ -59,13 +55,13 @@ class TrainingPhase:
                 continue
 
             # Get next activation to process
-            activation_data: ActivationData = await self.activation_queue.get_activation()
+            activation = await self.activation_queue.get_activation()
 
-            with logger.contextualize(activation_id=activation_data.activation_id):
-                if activation_data.direction == "forward":
-                    await self.forward(activation_data)
-                elif activation_data.direction == "backward":
-                    await self.backward(activation_data)
+            with logger.contextualize(activation_id=activation.activation_id):
+                if activation.direction == "forward":
+                    await self.forward(activation)
+                elif activation.direction == "backward":
+                    await self.backward(activation)
             # Loop until LayerStateException is raised by `get_activation`
 
     async def forward(self, activation_data: ActivationData):
@@ -90,14 +86,14 @@ class TrainingPhase:
             logger.debug(f"Got activation shape: {activation_data.input_activations.shape}")
 
         # Perform the actual forward pass
+
         logger.debug(f"Forwarding activation of size {activation_data.input_activations.shape}")
-        output_activations, activation_state = await self.model_manager._forward(
+        output_activations, state = await self.model_manager._forward(
             layer=self.state_manager.layer, input_activations=activation_data.input_activations
         )
 
-        # Make None to save memory, recompute in backward pass
-        activation_data.output_activations = None
-        activation_data.state = activation_state
+        activation_data.output_activations = output_activations
+        activation_data.state = state
         activation_data.upload_time = time.time()
 
         await self.state_manager.add_to_activation_cache(
@@ -108,19 +104,14 @@ class TrainingPhase:
         if self.state_manager.layer == self.model_manager.model_metadata["n_splits"] - 1:
             # Compute loss; if targets download or loss computation fails, skip backward gracefully
             try:
-                loss = await self.compute_last_layer_loss(
-                    activation_data=activation_data, logits=output_activations, use_cpu=True
-                )
+                await self.compute_last_layer_loss(activation_data=activation_data)
             except Exception as e:
                 logger.warning(
                     f"Skipping backward for activation {activation_data.activation_id} due to loss/target fetch error: {e}"
                 )
                 return
 
-            del output_activations
-            torch.cuda.empty_cache()
-
-            return await self.backward(activation_data=activation_data, loss=loss)
+            return await self.backward(activation_data=activation_data)
 
         # If we are not on the last layer, we just need to upload the activations
         logger.info(
@@ -131,9 +122,6 @@ class TrainingPhase:
             tensor=output_activations.detach().clone(),
             hotkey=self.miner_api_client.hotkey,
         )
-
-        del output_activations
-        torch.cuda.empty_cache()
 
         await self.miner_api_client.submit_activation_request(
             submit_activation_request=SubmitActivationRequest(
@@ -146,7 +134,7 @@ class TrainingPhase:
             f"✅ Successfully completed FORWARD pass for activation {activation_data.activation_id} on layer {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
         )
 
-    async def backward(self, activation_data: ActivationData, loss: torch.Tensor = None):
+    async def backward(self, activation_data: ActivationData):
         """
         Performs the backward pass.
         """
@@ -158,42 +146,29 @@ class TrainingPhase:
         if activation_data.activation_id not in self.state_manager.activation_cache:
             logger.warning(f"⚠️ Activation {activation_data.activation_id} not found in cache, skipping backward pass")
             return
+        cached_activations = self.state_manager.activation_cache[activation_data.activation_id]
 
-        cached_forward_activation_data = self.state_manager.activation_cache[activation_data.activation_id]
-        input_activations: torch.Tensor = cached_forward_activation_data.input_activations
+        # Move to GPU and enable gradients only for floating point tensors
+        input_activations: torch.Tensor = cached_activations.input_activations.to(miner_settings.DEVICE)
+        output_activations: torch.Tensor = cached_activations.output_activations.to(miner_settings.DEVICE)
 
-        # Recompute activations
-        if self.state_manager.layer != self.model_manager.model_metadata["n_splits"] - 1:
-            assert loss is None, "Output activations should be None if not on the last layer"
-            output_activations, _ = await self.model_manager._forward(
-                layer=self.state_manager.layer, input_activations=input_activations
-            )
-        else:
-            assert loss is not None, "Output activations should not be None if on the last layer"
-            output_activations = loss
+        state = cached_activations.state
 
         logger.info(
             f"output activations before backward with shape {output_activations.shape} for {self.hotkey[:8]} on layer {self.state_manager.layer}"
         )
-
         await self.model_manager._backward(
             layer=self.state_manager.layer,
             output_activations=output_activations,
             activation_grads=activation_data.input_activations,
-            state=activation_data.state,
+            state=state,
         )
 
         self.state_manager.backwards_since_reset += 1
         logger.debug(f"Backwards since reset for miner {self.hotkey[:8]}: {self.state_manager.backwards_since_reset}")
-
-        if input_activations.is_cuda:
-            logger.warning("Input activations at the end of backward are still on the GPU... Casting to CPU")
-            input_activations = input_activations.to("cpu")
-            torch.cuda.empty_cache()
-
         # Handle different cases for input activation gradients
         if common_settings.MOCK:
-            input_activation_grads = input_activations.detach().to(torch.bfloat16)
+            input_activation_grads = input_activations.detach().to(torch.bfloat16).cpu()
 
         elif self.state_manager.layer == 0:
             # Get the embedding layer weight grads instead of the input activations grads
@@ -204,18 +179,13 @@ class TrainingPhase:
                 if self.model_manager.model_config["bottleneck_dim"] is not None
                 else self.model_manager.model_config["emb_dim"]
             )
-
-            # Access gradient from the original tensor (on GPU), then move to CPU
-            if emb_weight.grad is None:
-                raise RuntimeError("Embedding weight gradient is None - backward pass may not have been called")
-
-            grad_flattened = emb_weight.grad.clone().flatten().cpu()
+            grad_flattened = emb_weight.grad.clone().flatten()
             input_activation_grads = grad_flattened[
                 : common_settings.SEQUENCE_LENGTH * embedding_dim * common_settings.MINI_BATCH_SIZE
             ]
 
             # Detach and convert to bfloat16 to ensure we only save the values
-            input_activation_grads = input_activation_grads.detach().to(torch.bfloat16)
+            input_activation_grads = input_activation_grads.detach().to(torch.bfloat16).cpu()
 
         else:
             input_activation_grads = input_activations.grad
@@ -257,41 +227,30 @@ class TrainingPhase:
             f"✅ Successfully completed BACKWARD pass for activation {activation_data.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
         )
 
-    async def compute_last_layer_loss(
-        self, activation_data: ActivationData, logits: torch.Tensor, use_cpu: bool = False
-    ) -> torch.Tensor:
+    async def compute_last_layer_loss(self, activation_data: ActivationData):
         """
         Performs the backward pass for the last layer.
         """
-
-        device = "cpu" if use_cpu else miner_settings.DEVICE
 
         initial_activations_path = await self.miner_api_client.get_targets(
             get_targets_request=GetTargetsRequest(activation_id=activation_data.activation_id),
         )
 
         # Target sample is the initial activations
-        targets: torch.Tensor = await download_sample(
-            download_url=initial_activations_path, tokenizer=self.model_manager.tokenizer, device=device
-        )
+        # Target sample is the initial activations
+        targets = await download_sample(download_url=initial_activations_path, tokenizer=self.model_manager.tokenizer)
         logger.debug(f"Downloaded targets: {targets}")
         logger.debug(f"Targets shape: {targets.shape}")
         logger.debug(f"Targets dtype: {targets.dtype}")
 
         loss: torch.Tensor = compute_loss(
             mock=common_settings.MOCK,
-            logits=logits,
+            logits=activation_data.output_activations,
             targets=targets,
             vocab_size=self.model_manager.vocab_size,
             pad_token_id=self.model_manager.eos_token_id,
             pack=miner_settings.PACK_SAMPLES,
-            device=device,
         )
-
-        # Free targets from GPU memory immediately after loss computation
-        del targets
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
         check_for_nans_and_infs(tensor=loss, name=f"Loss for miner {self.hotkey[:8]}", exception_type=NanInfException)
 
@@ -300,6 +259,7 @@ class TrainingPhase:
         )
 
         # Update cache with loss before attempting to report it to handle API errors gracefully
+        activation_data.output_activations = loss
         activation_data.upload_time = time.time()
         await self.state_manager.add_to_activation_cache(
             activation_id=activation_data.activation_id,
@@ -307,12 +267,10 @@ class TrainingPhase:
         )
 
         try:
+            loss_copy: torch.Tensor = loss.clone().detach()
             await self.miner_api_client.report_loss(
-                loss_report=LossReportRequest(activation_id=activation_data.activation_id, loss=loss.item()),
+                loss_report=LossReportRequest(activation_id=activation_data.activation_id, loss=loss_copy.item()),
             )
 
         except Exception as e:
             logger.error(f"Error reporting loss: {e}")
-
-        # on GPU
-        return loss
