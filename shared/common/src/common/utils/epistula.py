@@ -1,4 +1,4 @@
-import json
+import orjson
 import time
 from hashlib import sha256
 from math import ceil
@@ -120,4 +120,4 @@ def generate_header(
 
 def create_message_body(data: dict) -> bytes:
     """Utility method to create message body from dictionary data"""
-    return json.dumps(data, default=str, sort_keys=True).encode("utf-8")
+    return orjson.dumps(data, default=str, option=orjson.OPT_SORT_KEYS)
