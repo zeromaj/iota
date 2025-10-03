@@ -1,7 +1,7 @@
 import asyncio
 import copy
 from loguru import logger
-import json
+import orjson
 import sys
 import time
 from miner.utils.partition_merging import download_previous_optimizer_state_for_partition_batch, merge_partition_batch
@@ -681,7 +681,7 @@ class Miner(BaseNeuron, HealthServerMixin):
             # Upload metadata as activation type since orchestrator doesn't have a metadata type
             metadata_path = await upload_file(
                 miner_api_client=self.miner_api_client,
-                data=json.dumps(metadata).encode(),
+                data=orjson.dumps(metadata, option=orjson.OPT_SORT_KEYS),
                 file_type="weights_metadata",
                 hotkey=self.wallet.hotkey,
             )

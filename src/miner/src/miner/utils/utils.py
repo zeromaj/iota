@@ -1,5 +1,5 @@
 import asyncio
-import json
+import orjson
 import gzip
 from urllib.parse import urlparse
 
@@ -109,7 +109,7 @@ async def download_metadata(metadata_path: str) -> dict:
         logger.warning(f"Metadata is too large: {len(metadata_bytes)} bytes")
         raise ValueError(f"Metadata is too large: {len(metadata_bytes)} bytes")
 
-    metadata: dict = json.loads(metadata_bytes)
+    metadata: dict = orjson.loads(metadata_bytes)
     return metadata
 
 
