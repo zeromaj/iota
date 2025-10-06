@@ -3,10 +3,10 @@ from loguru import logger
 
 from common import settings as common_settings
 from common.utils.s3_utils import download_file
-from miner import settings as miner_settings
+from subnet.model.utils import log_cuda_memory_usage
 
 
-async def download_sample(download_url: str, tokenizer) -> torch.Tensor:
+async def download_sample(download_url: str, tokenizer, device: str = "cpu") -> torch.Tensor:
     """
     Downloads the sample from the given URL and returns it as a tensor.
 
@@ -14,6 +14,7 @@ async def download_sample(download_url: str, tokenizer) -> torch.Tensor:
         download_url: The URL of the sample to download.
         tokenizer: The tokenizer to use to decode the sample.
     """
+    log_cuda_memory_usage(note="before downloading sample")
     data = await download_file(presigned_url=download_url)
 
     # Some objects may be gzip-compressed without content-encoding header in R2; try transparently
@@ -30,7 +31,7 @@ async def download_sample(download_url: str, tokenizer) -> torch.Tensor:
     if common_settings.MOCK:
         return torch.randn(size=(common_settings.MINI_BATCH_SIZE, 100), dtype=torch.bfloat16).to("cpu")
 
-    sample = torch.tensor(tokenizer.encode(text)).to(miner_settings.DEVICE)
+    sample = torch.tensor(tokenizer.encode(text)).to(device)
     if len(sample) < common_settings.SEQUENCE_LENGTH * common_settings.MINI_BATCH_SIZE:
         raise Exception(
             f"Sample is too short: {len(sample)} < {common_settings.SEQUENCE_LENGTH * common_settings.MINI_BATCH_SIZE}"
@@ -38,6 +39,8 @@ async def download_sample(download_url: str, tokenizer) -> torch.Tensor:
 
     sample = sample[: common_settings.SEQUENCE_LENGTH * common_settings.MINI_BATCH_SIZE]
     sample = sample.reshape(common_settings.MINI_BATCH_SIZE, common_settings.SEQUENCE_LENGTH)
+
+    log_cuda_memory_usage(note="after downloading sample")
 
     logger.info(f"Sample shape: {sample.shape}")
     return sample

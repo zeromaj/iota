@@ -21,7 +21,6 @@ class RunFlag(BaseModel):
 class RunFlags(BaseModel):
     test_flag: RunFlag = RunFlag()
     compress_s3_files: RunFlag = RunFlag()
-    async_activation_cache: RunFlag = RunFlag()
 
 
 RUN_FLAGS = RunFlags()

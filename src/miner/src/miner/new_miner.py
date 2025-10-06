@@ -3,7 +3,6 @@ import copy
 from loguru import logger
 import json
 import sys
-import time
 from miner.utils.partition_merging import download_previous_optimizer_state_for_partition_batch, merge_partition_batch
 from miner.utils.partition_merging import get_partition_batch
 from miner.utils.partition_merging import download_pseudograds_for_partition_batch
@@ -14,13 +13,12 @@ import aiohttp
 from bittensor import Wallet
 from subnet.common_api_client import CommonAPIClient
 from miner.health_server import HealthServerMixin
-from miner.utils.activation_utils import download_sample
 from miner.utils.partition_merging import (
     filter_bad_metadata,
     get_weight_partition_info,
 )
 from miner import settings as miner_settings
-from miner.state_manager import ActivationData, StateManager
+from miner.state_manager import StateManager
 from miner.utils.utils import (
     create_metadata,
     upload_file,
@@ -30,14 +28,8 @@ from miner.utils.utils import (
 from miner.utils.run_utils import identify_best_run
 from common import settings as common_settings
 from common.models.api_models import (
-    ActivationResponse,
-    CompleteFileUploadResponse,
-    GetActivationRequest,
-    GetTargetsRequest,
-    LossReportRequest,
     MinerRegistrationResponse,
     RegisterMinerRequest,
-    SubmitActivationRequest,
     SubmittedWeightsAndOptimizerPresigned,
     WeightUpdate,
 )
@@ -58,14 +50,13 @@ from common.utils.shared_states import LayerPhase
 from common.models.run_flags import RUN_FLAGS  # noqa: F401
 from subnet.base.base_neuron import BaseNeuron
 from subnet.miner_api_client import MinerAPIClient
-from subnet.model.utils import _clean_gpu_memory, compute_loss
+from subnet.model.utils import _clean_gpu_memory, log_cuda_memory_usage
 from subnet.test_client import TestAPIClient
 from subnet.utils.partition_utils import (
     MergingPartition,
     load_model_weights,
     load_model_weights_and_optimizer_state,
 )
-from subnet.utils.s3_torch import download_tensor
 from subnet.utils.vector_utils import check_for_nans_and_infs
 from miner.training import TrainingPhase
 
@@ -143,17 +134,9 @@ class Miner(BaseNeuron, HealthServerMixin):
 
                         # Need to ensure that we don't pull weights again in this loop
                         self.need_to_pull_weights = False
-
-                        if RUN_FLAGS.async_activation_cache.isOn():
-                            self.weights_submitted = False
-                            self.partitions_submitted = False
-                            await self.training_phase.run()
-                        else:
-                            await self.step()
-
                         self.weights_submitted = False
                         self.partitions_submitted = False
-                        continue
+                        await self.training_phase.run()
 
                     if self.miner_api_client.layer_state == LayerPhase.WEIGHTS_UPLOADING:
                         self.need_to_pull_weights = True
@@ -240,320 +223,6 @@ class Miner(BaseNeuron, HealthServerMixin):
             except Exception:
                 raise
 
-    async def step(self):
-        logger.info(
-            f"🔄 Miner {self.hotkey[:8]} step | Layer: {self.state_manager.layer} \n"
-            f"is_training: {self.miner_api_client.layer_state} \n"
-            f"backwards_since_reset: {self.state_manager.backwards_since_reset} \n"
-            f"len(activation_cache): {len(self.state_manager.activation_cache)}"
-        )
-
-        # Check if any of the activations in the cache have timed out and remove them
-        if len(self.state_manager.activation_cache) == miner_settings.ACTIVATION_CACHE_SIZE:
-            self.state_manager.check_if_timeout(timeout=common_settings.ACTIVATION_CACHE_TIMEOUT)
-
-        response: list[ActivationResponse] | dict = await self.miner_api_client.get_activations(
-            get_activation_request=GetActivationRequest(n_fwd_activations=5)
-        )
-        if response is None:
-            raise Exception("Error getting activation")
-
-        tasks = []
-        for activation in response:
-            if activation.direction == "forward":
-                tasks.append(self.forward(activation))
-            elif activation.direction == "backward":
-                tasks.append(self.backward(activation))
-        await asyncio.gather(*tasks)
-
-        if self.state_manager.backwards_since_last_optim >= common_settings.MINI_BATCH_ACCUMULATION_COUNT:
-            logger.info(
-                f"🔄 Miner {self.hotkey[:8]} performing local optimization step after {common_settings.MINI_BATCH_ACCUMULATION_COUNT} backward passes"
-            )
-            learning_rate = await self.miner_api_client.get_learning_rate()
-            await self.model_manager.local_optimization_step(learning_rate=learning_rate)
-            self.state_manager.reset_optimization_counter()
-
-            self.state_manager.local_optimization_steps += 1
-            logger.info(
-                f"✅ Miner {self.hotkey[:8]} completed local optimization step #{self.state_manager.local_optimization_steps}"
-            )
-
-    async def forward(self, activation: ActivationResponse):
-        """
-        Performs the forward pass.
-
-        If the layer is 0, it will load the data and upload the initial activation to the API.
-        If the layer is not 0, it will download a random forward activation from the API and perform the forward pass.
-
-        The forward pass contains:
-        - Downloading the forward activation from the API
-        - Performing the forward pass
-        - Reporting the loss to the API
-        - Performing the backward pass
-        """
-        if await self.state_manager.activation_cache_is_full(miner_api_client=self.miner_api_client):
-            logger.warning(
-                f"⚠️ Miner {self.hotkey[:8]} is out of cache ({len(self.state_manager.activation_cache)}/{miner_settings.ACTIVATION_CACHE_SIZE}), skipping forward pass until backwards have been performed"
-            )
-            await asyncio.sleep(1)
-            return
-
-        assert (
-            activation.presigned_download_url is not None and activation.presigned_upload_url is not None
-        ), f"Activation is required for layer {self.state_manager.layer}, activation: {activation}"
-
-        logger.info(
-            f"🚀 Starting FORWARD pass for layer {self.state_manager.layer} | Processing activation {activation.activation_id} | Miner: {self.hotkey[:8]}"
-        )
-        if self.state_manager.layer == 0:
-            # Load text file and tokenize
-            input_activations = await download_sample(
-                download_url=activation.presigned_download_url, tokenizer=self.model_manager.tokenizer
-            )
-            logger.debug(f"Got sample shape: {input_activations.shape}")
-        else:
-            # Download activation from S3
-            input_activations = await download_tensor(
-                path=activation.presigned_download_url, device=miner_settings.DEVICE
-            )
-            logger.debug(f"Got activation shape: {input_activations.shape}")
-            if not common_settings.MOCK:
-                input_activations = input_activations.reshape(
-                    common_settings.MINI_BATCH_SIZE,
-                    common_settings.SEQUENCE_LENGTH,
-                    self.model_manager.model_config.get("bottleneck_dim") or self.model_manager.model_config["emb_dim"],
-                )
-            else:
-                input_activations = input_activations.reshape(
-                    common_settings.MINI_BATCH_SIZE,
-                    100,
-                )
-
-        # Perform the actual forward pass
-
-        logger.debug(f"Forwarding activation of size {input_activations.shape}")
-        output_activations, state = await self.model_manager._forward(
-            layer=self.state_manager.layer, input_activations=input_activations
-        )
-
-        await self.state_manager.add_to_activation_cache(
-            activation_id=activation.activation_id,
-            data=ActivationData(
-                activation_id=activation.activation_id,
-                direction=activation.direction,
-                input_activations=input_activations,
-                output_activations=output_activations,
-                state=state,
-                upload_time=time.time(),
-            ),
-        )
-
-        if self.state_manager.layer == self.model_manager.model_metadata["n_splits"] - 1:
-            # Compute loss; if targets download or loss computation fails, skip backward gracefully
-            try:
-                await self.compute_last_layer_loss(
-                    output_activations=output_activations,
-                    input_activation_response=activation,
-                    state=state,
-                    input_activations=input_activations,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Skipping backward for activation {activation.activation_id} due to loss/target fetch error: {e}"
-                )
-                return
-
-            return await self.backward(activation=activation)
-
-        # If we are not on the last layer, we just need to upload the activations
-        logger.info(
-            f"output activations before upload with shape {output_activations.shape} for {self.hotkey[:8]} on layer {self.state_manager.layer}"
-        )
-        upload_response: CompleteFileUploadResponse = await upload_tensor(
-            miner_api_client=self.miner_api_client,
-            tensor=output_activations.detach().clone(),
-            hotkey=self.wallet.hotkey,
-        )
-
-        await self.miner_api_client.submit_activation_request(
-            submit_activation_request=SubmitActivationRequest(
-                activation_id=activation.activation_id,
-                activation_path=upload_response.object_path,
-                direction="forward",
-            ),
-        )
-        logger.info(
-            f"✅ Successfully completed FORWARD pass for activation {activation.activation_id} on layer {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
-        )
-
-    async def backward(
-        self,
-        activation: ActivationResponse,
-    ):
-        logger.info(
-            f"🔄 Starting BACKWARD pass for activation {activation.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
-        )
-
-        # Check if activation is in cache
-        if activation.activation_id not in self.state_manager.activation_cache:
-            logger.warning(f"⚠️ Activation {activation.activation_id} not found in cache, skipping backward pass")
-            return
-        activation_grads = None
-        if (
-            self.state_manager.layer != self.model_manager.model_metadata["n_splits"] - 1
-            and self.model_manager.model_metadata["n_splits"] > 1
-        ):
-            # For backward pass, we need to get activations that we have cached forward activations for
-            # So we still need to list first, then filter, then randomly select
-            activation_grads: torch.Tensor = await download_tensor(
-                path=activation.presigned_download_url, device=miner_settings.DEVICE
-            )
-            if not common_settings.MOCK:
-                activation_grads = activation_grads.reshape(
-                    common_settings.MINI_BATCH_SIZE,
-                    common_settings.SEQUENCE_LENGTH,
-                    self.model_manager.model_config.get("bottleneck_dim")
-                    or self.model_manager.model_config.get("emb_dim"),
-                )
-            else:
-                activation_grads = activation_grads.reshape(
-                    common_settings.MINI_BATCH_SIZE,
-                    100,
-                )
-
-        # Get activations from cache and move back to GPU
-        cached_activations = self.state_manager.activation_cache[activation.activation_id]
-
-        # Move to GPU and enable gradients only for floating point tensors
-        input_activations: torch.Tensor = cached_activations.input_activations.to(miner_settings.DEVICE)
-        output_activations: torch.Tensor = cached_activations.output_activations.to(miner_settings.DEVICE)
-
-        state = cached_activations.state
-
-        logger.info(
-            f"output activations before backward with shape {output_activations.shape} for {self.hotkey[:8]} on layer {self.state_manager.layer}"
-        )
-        await self.model_manager._backward(
-            layer=self.state_manager.layer,
-            output_activations=output_activations,
-            activation_grads=activation_grads,
-            state=state,
-        )
-
-        self.state_manager.backwards_since_reset += 1
-        logger.debug(f"Backwards since reset for miner {self.hotkey[:8]}: {self.state_manager.backwards_since_reset}")
-        # Handle different cases for input activation gradients
-        if common_settings.MOCK:
-            input_activation_grads = input_activations.detach().to(torch.bfloat16).cpu()
-
-        elif self.state_manager.layer == 0:
-            # Get the embedding layer weight grads instead of the input activations grads
-            # This is because input activation grads of the first layer do not exist.
-            emb_weight = self.model_manager.model.tok_emb.weight
-            embedding_dim = (
-                self.model_manager.model_config["bottleneck_dim"]
-                if self.model_manager.model_config["bottleneck_dim"] is not None
-                else self.model_manager.model_config["emb_dim"]
-            )
-            grad_flattened = emb_weight.grad.clone().flatten()
-            input_activation_grads = grad_flattened[
-                : common_settings.SEQUENCE_LENGTH * embedding_dim * common_settings.MINI_BATCH_SIZE
-            ]
-
-            # Detach and convert to bfloat16 to ensure we only save the values
-            input_activation_grads = input_activation_grads.detach().to(torch.bfloat16).cpu()
-
-        else:
-            input_activation_grads = input_activations.grad
-
-        upload_response: CompleteFileUploadResponse = await upload_tensor(
-            miner_api_client=self.miner_api_client,
-            tensor=input_activation_grads,
-            hotkey=self.wallet.hotkey,
-        )
-
-        logger.info(
-            f"input activation grads before upload with shape {input_activation_grads.shape} for {self.hotkey[:8]} on layer {self.state_manager.layer}"
-        )
-        await self.miner_api_client.submit_activation_request(
-            submit_activation_request=SubmitActivationRequest(
-                activation_id=activation.activation_id,
-                activation_path=upload_response.object_path,
-                direction="backward",
-            ),
-        )
-        # Remove from cache
-        await self.state_manager.remove_from_activation_cache(activation.activation_id)
-
-        # Check if we need to perform a local optimization step
-        self.state_manager.increment_backward_count()
-
-        logger.info(
-            f"✅ Successfully completed BACKWARD pass for activation {activation.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
-        )
-
-    async def compute_last_layer_loss(
-        self,
-        output_activations: torch.Tensor,
-        input_activation_response: ActivationResponse,
-        state: dict,
-        input_activations: torch.Tensor,
-    ):
-        """
-        Performs the backward pass for the last layer.
-        """
-
-        initial_activations_path = await self.miner_api_client.get_targets(
-            get_targets_request=GetTargetsRequest(activation_id=input_activation_response.activation_id),
-        )
-
-        # Target sample is the initial activations
-        # TODO: can we do this async with the queue?
-        targets = await download_sample(download_url=initial_activations_path, tokenizer=self.model_manager.tokenizer)
-        logger.debug(f"Downloaded targets: {targets}")
-        logger.debug(f"Targets shape: {targets.shape}")
-        logger.debug(f"Targets dtype: {targets.dtype}")
-
-        loss: torch.Tensor = compute_loss(
-            mock=common_settings.MOCK,
-            logits=output_activations,
-            targets=targets,
-            vocab_size=self.model_manager.vocab_size,
-            pad_token_id=self.model_manager.eos_token_id,
-            pack=miner_settings.PACK_SAMPLES,
-        )
-
-        check_for_nans_and_infs(tensor=loss, name=f"Loss for miner {self.hotkey[:8]}", exception_type=NanInfException)
-
-        logger.info(
-            f"📊 Computed loss {loss:.6f} for activation {input_activation_response.activation_id} | Layer: {self.state_manager.layer} | Miner: {self.hotkey[:8]}"
-        )
-
-        # Update cache with loss before attempting to report it to handle API errors gracefully
-        await self.state_manager.add_to_activation_cache(
-            activation_id=input_activation_response.activation_id,
-            data=ActivationData(
-                activation_id=input_activation_response.activation_id,
-                direction=input_activation_response.direction,
-                input_activations=input_activations,
-                output_activations=loss,
-                state=state,
-                upload_time=time.time(),
-            ),
-        )
-
-        try:
-            loss_copy: torch.Tensor = loss.clone().detach()
-            await self.miner_api_client.report_loss(
-                loss_report=LossReportRequest(
-                    activation_id=input_activation_response.activation_id, loss=loss_copy.item()
-                ),
-            )
-
-        except Exception as e:
-            logger.error(f"Error reporting loss: {e}")
-
     async def register_loop(self) -> tuple[dict, dict]:
         """
         Register the miner with the orchestrator, acquiring a layer during the process.
@@ -620,7 +289,7 @@ class Miner(BaseNeuron, HealthServerMixin):
             SubmittedWeightsError: If the weights are not submitted successfully
             e: If there is an error submitting the weights
         """
-        if self.state_manager.backwards_since_reset == 0:
+        if self.training_phase.backwards_since_reset == 0:
             logger.warning(f"Backwards since reset for miner {self.hotkey[:8]} is 0, skipping")
             return
 
@@ -653,7 +322,7 @@ class Miner(BaseNeuron, HealthServerMixin):
 
         try:
             self.model_manager.optimizer.zero_grad()
-            self.state_manager.reset_optimization_counter()
+            await self.training_phase.optimization_reset()
 
             try:
                 await self.miner_api_client.notify_orchestrator_of_state_call()
@@ -767,7 +436,7 @@ class Miner(BaseNeuron, HealthServerMixin):
 
         old_run_id = self.state_manager.run_id
         old_layer = self.state_manager.layer
-        self.state_manager.reset()
+        await self.training_phase.reset()
         # We provide the model config and metadata so that all miners are aligned.
         model_config, model_metadata = await self.register_loop()
 
@@ -858,8 +527,31 @@ class Miner(BaseNeuron, HealthServerMixin):
             merging_partitions = await download_previous_optimizer_state_for_partition_batch(merging_partitions)
             logger.debug(f"{len(merging_partitions)} batch partitions downloaded previous optimizer state")
 
+            # Determine if we have enough memory in the GPU to merge the partitions on GPU or CPU
+            device = miner_settings.DEVICE
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                avail_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                # TODO: @cassova: correct this calculation - 100x is just to push it to cpu for now
+                need_to_merge_on_gpu = (
+                    100
+                    * torch.nn.utils.parameters_to_vector(self.model_manager.model.parameters()).numel()
+                    * len(merging_partitions)
+                )
+                if need_to_merge_on_gpu > avail_memory:
+                    logger.warning(
+                        "Not enough memory available to merge partitions on GPU"
+                        f" - needed {need_to_merge_on_gpu / 1024**3:.2f}GB, available {avail_memory / 1024**3:.2f}GB"
+                    )
+                    device = "cpu"
+
             # Load old weights into model
-            old_model = copy.deepcopy(self.model_manager.model)
+            if device == "cpu":
+                old_model = copy.deepcopy(self.model_manager.model).cpu()
+            else:
+                old_model = copy.deepcopy(self.model_manager.model)
+                log_cuda_memory_usage(note="after copying old model")
             torch.nn.utils.vector_to_parameters(
                 load_model_weights(
                     hotkey=self.hotkey, run_id=self.state_manager.run_id, layer_idx=self.state_manager.layer
@@ -875,8 +567,10 @@ class Miner(BaseNeuron, HealthServerMixin):
                 local_optimizer_state=self.model_manager.optimizer,
                 weights_length=torch.nn.utils.parameters_to_vector(old_model.parameters()).numel(),
                 num_partitions=self.num_partitions,
+                device=device,
             )
             logger.debug(f"{len(merged_partitions)} batch partitions merged")
+            log_cuda_memory_usage(note=f"after merging partitions on {device}")
 
             # Upload the merged partitions to the database and return list of MinerPartition
             final_partitions = await upload_partition_batch(
@@ -889,3 +583,10 @@ class Miner(BaseNeuron, HealthServerMixin):
             # Submit the merged partitions to the database
             await self.miner_api_client.submit_merged_partitions(merged_partitions=final_partitions)
             logger.debug(f"{len(final_partitions)} batch partitions submitted")
+
+            self.model_manager.model.to(miner_settings.DEVICE)
+
+            del old_model
+            del merged_partitions  # TODO: @cassova: do a better job of cleaning this up
+            del final_partitions  # TODO: @cassova: do a better job of cleaning this up
+            log_cuda_memory_usage(note="after merging partitions")
