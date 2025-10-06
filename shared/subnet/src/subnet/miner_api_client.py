@@ -110,7 +110,7 @@ class MinerAPIClient(CommonAPIClient):
             )
             self.parse_response(response)
         except Exception as e:
-            logger.exception(f"Error reporting loss: {e}")
+            logger.error(f"Error reporting loss: {e}")
             raise e
 
     async def submit_activation_request(self, submit_activation_request: SubmitActivationRequest) -> None:

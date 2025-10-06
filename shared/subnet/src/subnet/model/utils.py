@@ -1,12 +1,13 @@
 import gc
 from loguru import logger
-
+import time
 from typing import Tuple, Dict, Union
 from transformers import AutoModelForCausalLM, AutoConfig
 import torch
 import numpy as np
 
 
+# OBSOLETE
 def load_model_from_hf(model_name: str, pretrained: bool, device: Union[str, torch.device]):
     """
     Load a model from HuggingFace.
@@ -28,6 +29,7 @@ def compute_loss(
     vocab_size: int,
     pad_token_id: int,
     pack: bool,
+    device: str,
 ):
     """
     Compute the loss for the given logits and batch.
@@ -39,17 +41,25 @@ def compute_loss(
         vocab_size (int): Vocabulary size
         pad_token_id (int): Padding token id
         pack (bool): Whether sample packing is used
+        device (str): Device to use for loss computation
 
     Returns:
         torch.Tensor: Computed loss
     """
+    log_cuda_memory_usage(note="before loss computation")
+    start_time = time.time()
     if mock:
         loss = logits.sum()
         return loss
 
+    logits_gpu = logits.to(device)
+    targets_gpu = targets.to(device)
+
     # Shift the logits and labels to compute the loss.
-    shift_logits = logits[..., :-1, :].contiguous()
-    shift_labels = targets[..., 1:].contiguous()
+    shift_logits = logits_gpu[..., :-1, :].contiguous()
+    shift_labels = targets_gpu[..., 1:].contiguous()
+
+    log_cuda_memory_usage(note="after allocating loss memory")
 
     if not pack:
         # If sample packing is not used,
@@ -69,6 +79,12 @@ def compute_loss(
     shift_logits = shift_logits.view(-1, vocab_size)
     shift_labels = shift_labels.view(-1)
     loss = loss_fct(shift_logits, shift_labels)
+
+    logger.info(f"Loss computation took {time.time() - start_time:.2f}s on {device}")
+
+    # del logits_gpu, targets_gpu # NOTE: possibly causing the last-layer's inputs to no longer have .grad
+
+    log_cuda_memory_usage(note="after loss computation")
 
     return loss
 
@@ -326,6 +342,18 @@ def unpack_int8_with_meta(packed: torch.Tensor, codes_shape: list[int]) -> Tuple
     return codes, {"scale": scale, "offset": offset}
 
 
+def log_cuda_memory_usage(note: str):
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+        allocated_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+        logger.info(f"GPU memory usage: {allocated_memory:.2f}GB / {total_memory:.2f}GB -- {note}")
+
+        if allocated_memory > total_memory * 0.8:  # If more than 80% already used
+            logger.warning(f"High GPU memory usage detected: {allocated_memory:.2f}GB -- {note}")
+
+
 def dequantize_nd_tensor_uint8_uniform(x: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """
     Dequantize a tensor of uint8 values back to float32. Given a tensor
@@ -466,4 +494,4 @@ def _clean_gpu_memory():
         torch.cuda.synchronize()  # (optional) make sure the allocator work is finished
 
     gc.collect()
-    logger.debug(f"Miner GPU memory cleaned. memory: {torch.cuda.memory_allocated() / 1024**3:.2f}GB")
+    log_cuda_memory_usage(note="after cleaning")

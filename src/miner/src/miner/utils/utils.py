@@ -267,7 +267,7 @@ def extract_filename_from_url(url):
 
 async def wait_for_state(state: LayerPhase, miner_api_client: MinerAPIClient, raise_bad_sync: bool = True):
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
         logger.info(f"Waiting for state {state}")
         response = await miner_api_client.get_layer_state_request()
         if response == state.value:

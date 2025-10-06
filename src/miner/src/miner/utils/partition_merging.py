@@ -13,6 +13,7 @@ from miner import settings as miner_settings
 from miner.utils.utils import download_metadata, upload_tensor
 
 from subnet.miner_api_client import MinerAPIClient
+from subnet.model.utils import log_cuda_memory_usage
 from subnet.utils.partition_utils import MergingPartition, download_partition_optimizer
 from subnet.utils.s3_torch import download_weights_or_optimizer_state
 from subnet.utils.vector_utils import add_artificial_gradients, flatten_optimizer_state, reconstruct_optimizer_state
@@ -310,6 +311,7 @@ async def merge_partition_batch(
     local_optimizer_state: dict,
     num_partitions: int,
     weights_length: int,
+    device: str,
 ) -> dict[int, tuple[torch.Tensor, torch.Tensor, MinerPartition]]:
     # merge_results: dict[MinerPartition, tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -317,10 +319,13 @@ async def merge_partition_batch(
     valid_partitions = []
 
     for partition in partition_batch:
+        old_model_copy = None
+        weight_average = None
+        outer_optimizer = None
+        flat_optimizer_state = None
         try:
             logger.debug(f"merging partition {partition.new_partition.chunk_number}")
 
-            weight_average = None
             weight_counter = 0
 
             for metadata, weights in zip(filtered_metadata.values(), partition.pseudograds):
@@ -351,23 +356,22 @@ async def merge_partition_batch(
             # Average the weights
             weight_average /= weight_counter
             weight_average = weight_average.to(torch.bfloat16)
+            log_cuda_memory_usage(
+                note=f"after averaging partition weights on chunk {partition.new_partition.chunk_number}"
+            )
 
             old_model_copy = copy.deepcopy(old_model).to(torch.bfloat16)
             outer_optimizer, total_states = create_outer_optimizer(model=old_model_copy)
 
             if optimizer_shapes is None:
-                _, optimizer_shapes, _ = flatten_optimizer_state(outer_optimizer, device=miner_settings.DEVICE)
+                _, optimizer_shapes, _ = flatten_optimizer_state(outer_optimizer, device=device)
 
             optimizer_start_idx, optimizer_end_idx = await get_start_and_end_indices(
-                tensor_length=flatten_optimizer_state(optimizer=outer_optimizer, device=miner_settings.DEVICE)[
-                    0
-                ].numel(),
+                tensor_length=flatten_optimizer_state(optimizer=outer_optimizer, device=device)[0].numel(),
                 num_sections=num_partitions,
                 target_section=partition.new_partition.chunk_number,
             )
-            local_optimizer_state_flat, _, _ = flatten_optimizer_state(
-                optimizer=local_optimizer_state, device=miner_settings.DEVICE
-            )
+            local_optimizer_state_flat, _, _ = flatten_optimizer_state(optimizer=local_optimizer_state, device=device)
             local_optimizer_start_idx, local_optimizer_end_idx = await get_start_and_end_indices(
                 tensor_length=len(local_optimizer_state_flat),
                 num_sections=num_partitions,
@@ -381,6 +385,9 @@ async def merge_partition_batch(
 
             logger.debug(f"weight_start_idx: {weight_start_idx}, weight_end_idx: {weight_end_idx}")
             logger.debug(f"optimizer_start_idx: {optimizer_start_idx}, optimizer_end_idx: {optimizer_end_idx}")
+            log_cuda_memory_usage(
+                note=f"after getting start and end indices for partition {partition.new_partition.chunk_number}"
+            )
 
             # This should only happen after the first epoch.
             if partition.old_optimizer_state is not None:
@@ -391,6 +398,9 @@ async def merge_partition_batch(
                     optim_state_shapes=optimizer_shapes,
                     total_states=total_states,
                     optimizer=outer_optimizer,
+                )
+                log_cuda_memory_usage(
+                    note=f"after reconstructing outer optimizer state for partition {partition.new_partition.chunk_number}"
                 )
             else:
                 logger.warning(f"No old optimizer state found for partition {partition.new_partition.chunk_number}")
@@ -403,6 +413,9 @@ async def merge_partition_batch(
                 pseudograds_length=total_states,
                 model=old_model_copy,
             )
+            log_cuda_memory_usage(
+                note=f"after reconstructing full grads for partition {partition.new_partition.chunk_number}"
+            )
 
             # If the model has no gradients, this doesn't do anything.
             outer_optimizer.step()
@@ -413,10 +426,13 @@ async def merge_partition_batch(
             partition.local_optimizer_state = local_optimizer_state_flat[
                 local_optimizer_start_idx:local_optimizer_end_idx
             ]
-            flat_optimizer_state, _, _ = flatten_optimizer_state(outer_optimizer, device=miner_settings.DEVICE)
+            flat_optimizer_state, _, _ = flatten_optimizer_state(outer_optimizer, device=device)
             logger.debug(f"flat_optimizer_state: {flat_optimizer_state.shape}")
             logger.debug(f"optimizer_start_idx: {optimizer_start_idx}, optimizer_end_idx: {optimizer_end_idx}")
             partition.new_optimizer_state = flat_optimizer_state[optimizer_start_idx:optimizer_end_idx]
+            log_cuda_memory_usage(
+                note=f"after setting up new optimizer state for partition {partition.new_partition.chunk_number}"
+            )
 
             # Check if the weights and optimizer state are valid and add to the list of valid partitions
             if partition.new_weights is None or partition.new_optimizer_state is None:
@@ -426,9 +442,19 @@ async def merge_partition_batch(
                 logger.warning(f"Partition: {partition}")
                 continue
             valid_partitions.append(partition)
+            log_cuda_memory_usage(note=f"after fininhing the merge of partition {partition.new_partition.chunk_number}")
 
         except Exception as e:
             logger.exception(f"Failed to get partition {partition.new_partition.chunk_number}: {e}")
+        finally:
+            if old_model_copy is not None:
+                del old_model_copy
+            if weight_average is not None:
+                del weight_average
+            if outer_optimizer is not None:
+                del outer_optimizer
+            if flat_optimizer_state is not None:
+                del flat_optimizer_state
 
     logger.debug(f"Number of valid partitions: {len(valid_partitions)}")
     logger.debug(f"Number of invalid partitions: {len(partition_batch) - len(valid_partitions)}")
