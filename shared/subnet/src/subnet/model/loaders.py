@@ -10,6 +10,7 @@ from subnet.model.llama3.splits import (
     Llama3BodyModel,
 )
 from subnet.model.llama3.full import Llama3Model, Llama3ModelNativeBottlenecks
+from subnet.model import gpu_device
 
 
 def load_model_split(
@@ -34,7 +35,7 @@ def load_model_split(
     """
     # Set random seeds for deterministic initialization
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    gpu_device.manual_seed_all(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.backends.cudnn.deterministic = True

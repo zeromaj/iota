@@ -96,10 +96,10 @@ def run_single_miner_process(wallet_name: str, wallet_hotkey: str, miner_id: int
         colorize=True,
     )
     if common_settings.LOG_FILE_ENABLED:
-        log_file = f"miner_{wallet_hotkey}.log"
+        log_file = f"logs/miner_{wallet_hotkey}.log"
         if os.path.exists(log_file):
             current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archived_name = f"miner_{wallet_hotkey}_archived_at_{current_time}.log"
+            archived_name = f"logs/miner_{wallet_hotkey}_archived_at_{current_time}.log"
             os.rename(log_file, archived_name)
 
         logger.add(
@@ -221,10 +221,10 @@ def main():
         colorize=True,
     )
     if common_settings.LOG_FILE_ENABLED:
-        log_file = "multiple_miners_main.log"
+        log_file = "logs/multiple_miners_main.log"
         if os.path.exists(log_file):
             current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archived_name = f"multiple_miners_main_archived_at_{current_time}.log"
+            archived_name = f"logs/multiple_miners_main_archived_at_{current_time}.log"
             os.rename(log_file, archived_name)
 
         logger.add(

@@ -13,7 +13,8 @@ from miner.training.activation_queue import ActivationQueue
 from miner.training.activation_publisher import ActivationPublisher
 from subnet.miner_api_client import MinerAPIClient
 from subnet.model.model_mixin import ModelManager
-from subnet.model.utils import compute_loss, log_cuda_memory_usage
+from subnet.model.utils import compute_loss, log_gpu_memory_usage
+from subnet.model import gpu_device
 
 
 class TrainingPhase:
@@ -68,7 +69,7 @@ class TrainingPhase:
             # TODO: @cassova: determine if we want to add an optimization step here too
             # considering the last activation submission may have failed.
             await self.optimization_reset()
-            log_cuda_memory_usage(note="after training phase cleanup")
+            log_gpu_memory_usage(note="after training phase cleanup")
 
     async def forward(self, activation_data: ActivationData):
         """
@@ -87,7 +88,7 @@ class TrainingPhase:
             logger.info(
                 f"🚀 Starting FORWARD pass for layer {self._state_manager.layer} | Processing activation {activation_data.activation_id} | Miner: {self._hotkey[:8]}"
             )
-            log_cuda_memory_usage(note="starting training forward pass")
+            log_gpu_memory_usage(note="starting training forward pass")
             if self._state_manager.layer == 0:
                 logger.debug(f"Got sample shape: {activation_data.input_activations.shape}")
             else:
@@ -96,11 +97,12 @@ class TrainingPhase:
             # Perform the actual forward pass
 
             logger.debug(f"Forwarding activation of size {activation_data.input_activations.shape}")
+            self._model_manager.model = self._model_manager.model.to(miner_settings.DEVICE)
             input_activations_gpu = activation_data.input_activations.to(miner_settings.DEVICE)
             output_activations_gpu, state = await self._model_manager._forward(
                 layer=self._state_manager.layer, input_activations=input_activations_gpu
             )
-            log_cuda_memory_usage(note="after training forward pass")
+            log_gpu_memory_usage(note="after training forward pass")
 
             # we'll put a copy of the output activations on CPU
             activation_data.input_activations = input_activations_gpu  # keep it on the gpu while in cache
@@ -120,7 +122,7 @@ class TrainingPhase:
                         f"Skipping backward for activation {activation_data.activation_id} due to loss/target fetch error: {e}"
                     )
                     return
-                log_cuda_memory_usage(
+                log_gpu_memory_usage(
                     note=f"after training forward pass cleaning on last layer miner with cach size of {len(self._cache)}"
                 )
                 return await self.backward(activation_data=activation_data, loss=loss)
@@ -140,7 +142,7 @@ class TrainingPhase:
                 direction="forward",
             )
 
-            log_cuda_memory_usage(note="after training forward pass cleaning on non-last layer miner")
+            log_gpu_memory_usage(note="after training forward pass cleaning on non-last layer miner")
             logger.success(
                 f"✅ Successfully completed FORWARD pass for activation {activation_data.activation_id} on layer {self._state_manager.layer} | Miner: {self._hotkey[:8]}"
             )
@@ -153,7 +155,7 @@ class TrainingPhase:
             logger.info(
                 f"🔄 Starting BACKWARD pass for activation {activation_data.activation_id} | Layer: {self._state_manager.layer} | Miner: {self._hotkey[:8]}"
             )
-            log_cuda_memory_usage(note="starting training backward pass")
+            log_gpu_memory_usage(note="starting training backward pass")
 
             # Check if activation is in cache
             if activation_data.activation_id not in self._cache:
@@ -164,6 +166,7 @@ class TrainingPhase:
             cached_activations = self._cache[activation_data.activation_id]
 
             # Move to GPU and enable gradients only for floating point tensors
+            self._model_manager.model = self._model_manager.model.to(miner_settings.DEVICE)
             input_activations_gpu = cached_activations.input_activations.to(miner_settings.DEVICE)
             activation_grads_gpu = activation_data.input_activations.to(miner_settings.DEVICE)
             if loss is None:
@@ -175,7 +178,7 @@ class TrainingPhase:
                 # Use the loss from the last layer and copy it to GPU if it's not there already
                 output_activations_gpu = loss.to(miner_settings.DEVICE)
 
-            log_cuda_memory_usage(note="after preparing activations on training backward pass")
+            log_gpu_memory_usage(note="after preparing activations on training backward pass")
 
             logger.info(
                 f"output activations before backward with shape {output_activations_gpu.shape} for {self._hotkey[:8]} on layer {self._state_manager.layer}"
@@ -186,7 +189,7 @@ class TrainingPhase:
                 activation_grads=activation_grads_gpu,
                 state=cached_activations.state,
             )
-            log_cuda_memory_usage(note="after backward pass")
+            log_gpu_memory_usage(note="after backward pass")
 
             self.backwards_since_reset += 1
             logger.debug(f"Backwards since reset for miner {self._hotkey[:8]}: {self.backwards_since_reset}")
@@ -200,9 +203,7 @@ class TrainingPhase:
                 # This is because input activation grads of the first layer do not exist.
                 emb_weight = self._model_manager.model.tok_emb.weight
                 embedding_dim = (
-                    self._model_manager.model_config["bottleneck_dim"]
-                    if self._model_manager.model_config["bottleneck_dim"] is not None
-                    else self._model_manager.model_config["emb_dim"]
+                    self._model_manager.model_config["bottleneck_dim"] or self._model_manager.model_config["emb_dim"]
                 )
                 # Detach and convert to bfloat16 to ensure we only save the values
                 # NOTE: if we cast to bfloat16 after moving to CPU, there will be extra load if the grad is huge
@@ -214,7 +215,7 @@ class TrainingPhase:
             else:
                 input_activation_grads = input_activations_gpu.grad.detach().cpu()
 
-            log_cuda_memory_usage(note="after moving input activation grads to GPU")
+            log_gpu_memory_usage(note="after moving input activation grads to GPU")
 
             self._publisher.publish_activation(
                 tensor=input_activation_grads,
@@ -230,7 +231,7 @@ class TrainingPhase:
         del output_activations_gpu, input_activations_gpu, activation_grads_gpu, loss
 
         with logger.contextualize(cache_size=len(self._cache)):
-            log_cuda_memory_usage(note="after training backward pass cleaning")
+            log_gpu_memory_usage(note="after training backward pass cleaning")
 
             # Check if we need to perform a local optimization step
             self.backwards_since_last_optim += 1
@@ -242,7 +243,7 @@ class TrainingPhase:
                 await self._model_manager.local_optimization_step(learning_rate=learning_rate)
                 await self.optimization_reset()
 
-                log_cuda_memory_usage(note="after local optimization step")
+                log_gpu_memory_usage(note="after local optimization step")
 
                 self.local_optimization_steps += 1
                 logger.success(
@@ -265,11 +266,11 @@ class TrainingPhase:
         # the problem is that loss calculation is very heavy on the GPU memory
         # on A4000 a 1B, when on GPU, it took 0.03s to compute the loss - on the CPU performance it took 0.5s
         device = miner_settings.DEVICE
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+        if device != "cpu":
+            gpu_device.synchronize()
+            gpu_device.empty_cache()
             proxy_bytes_needed = logits.numel() * logits.element_size() * 5
-            avail_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            avail_memory = gpu_device.available_memory()
             if proxy_bytes_needed > avail_memory:
                 device = "cpu"
                 logger.warning(
@@ -315,4 +316,4 @@ class TrainingPhase:
 
         # we can't process backwards activations on forwards processed before the optimization step
         await self._cache.reset()
-        log_cuda_memory_usage(note="after cache reset")
+        log_gpu_memory_usage(note="after cache reset")

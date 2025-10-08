@@ -13,7 +13,7 @@ from miner import settings as miner_settings
 from miner.utils.utils import download_metadata, upload_tensor
 
 from subnet.miner_api_client import MinerAPIClient
-from subnet.model.utils import log_cuda_memory_usage
+from subnet.model.utils import log_gpu_memory_usage
 from subnet.utils.partition_utils import MergingPartition, download_partition_optimizer
 from subnet.utils.s3_torch import download_weights_or_optimizer_state
 from subnet.utils.vector_utils import add_artificial_gradients, flatten_optimizer_state, reconstruct_optimizer_state
@@ -210,7 +210,6 @@ async def get_weight_partition_info(
     return weight_path_per_layer, [MinerPartition(**p) for p in partitions]
 
 
-# OBSOLETE
 def get_total_optimizer_state_size(optimizer):
     state_dict = optimizer.state_dict()
     total_size = 0
@@ -223,7 +222,7 @@ def get_total_optimizer_state_size(optimizer):
     return total_size
 
 
-def create_outer_optimizer(model: torch.nn.Module):
+def create_outer_optimizer(model: torch.nn.Module, device: str | torch.device):
     """Create an outer optimizer that will be used to reconstruct the optimizer state dict from a partition."""
     optimizer = torch.optim.SGD(
         model.parameters(),
@@ -235,7 +234,7 @@ def create_outer_optimizer(model: torch.nn.Module):
     logger.debug(
         f"Creating outer optimizer with learning rate: {common_settings.NESTEROV_LEARNING_RATE} and momentum: {common_settings.NESTEROV_MOMENTUM}"
     )
-    add_artificial_gradients(model=model, device=miner_settings.DEVICE)
+    add_artificial_gradients(model=model, device=device)
     optimizer.step()
 
     total_states = get_total_optimizer_state_size(optimizer)
@@ -356,12 +355,12 @@ async def merge_partition_batch(
             # Average the weights
             weight_average /= weight_counter
             weight_average = weight_average.to(torch.bfloat16)
-            log_cuda_memory_usage(
+            log_gpu_memory_usage(
                 note=f"after averaging partition weights on chunk {partition.new_partition.chunk_number}"
             )
 
             old_model_copy = copy.deepcopy(old_model).to(torch.bfloat16)
-            outer_optimizer, total_states = create_outer_optimizer(model=old_model_copy)
+            outer_optimizer, total_states = create_outer_optimizer(model=old_model_copy, device=device)
 
             if optimizer_shapes is None:
                 _, optimizer_shapes, _ = flatten_optimizer_state(outer_optimizer, device=device)
@@ -385,7 +384,7 @@ async def merge_partition_batch(
 
             logger.debug(f"weight_start_idx: {weight_start_idx}, weight_end_idx: {weight_end_idx}")
             logger.debug(f"optimizer_start_idx: {optimizer_start_idx}, optimizer_end_idx: {optimizer_end_idx}")
-            log_cuda_memory_usage(
+            log_gpu_memory_usage(
                 note=f"after getting start and end indices for partition {partition.new_partition.chunk_number}"
             )
 
@@ -399,7 +398,7 @@ async def merge_partition_batch(
                     total_states=total_states,
                     optimizer=outer_optimizer,
                 )
-                log_cuda_memory_usage(
+                log_gpu_memory_usage(
                     note=f"after reconstructing outer optimizer state for partition {partition.new_partition.chunk_number}"
                 )
             else:
@@ -413,7 +412,7 @@ async def merge_partition_batch(
                 pseudograds_length=total_states,
                 model=old_model_copy,
             )
-            log_cuda_memory_usage(
+            log_gpu_memory_usage(
                 note=f"after reconstructing full grads for partition {partition.new_partition.chunk_number}"
             )
 
@@ -430,7 +429,7 @@ async def merge_partition_batch(
             logger.debug(f"flat_optimizer_state: {flat_optimizer_state.shape}")
             logger.debug(f"optimizer_start_idx: {optimizer_start_idx}, optimizer_end_idx: {optimizer_end_idx}")
             partition.new_optimizer_state = flat_optimizer_state[optimizer_start_idx:optimizer_end_idx]
-            log_cuda_memory_usage(
+            log_gpu_memory_usage(
                 note=f"after setting up new optimizer state for partition {partition.new_partition.chunk_number}"
             )
 
@@ -442,7 +441,7 @@ async def merge_partition_batch(
                 logger.warning(f"Partition: {partition}")
                 continue
             valid_partitions.append(partition)
-            log_cuda_memory_usage(note=f"after fininhing the merge of partition {partition.new_partition.chunk_number}")
+            log_gpu_memory_usage(note=f"after fininhing the merge of partition {partition.new_partition.chunk_number}")
 
         except Exception as e:
             logger.exception(f"Failed to get partition {partition.new_partition.chunk_number}: {e}")

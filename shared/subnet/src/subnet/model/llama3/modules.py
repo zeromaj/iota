@@ -9,9 +9,11 @@ import torch.nn as nn
 import random
 import numpy as np
 
+from subnet.model import gpu_device
+
 seed = 42
 torch.manual_seed(seed)
-torch.cuda.manual_seed_all(seed)
+gpu_device.manual_seed_all(seed)
 random.seed(seed)
 np.random.seed(seed)
 torch.backends.cudnn.deterministic = True

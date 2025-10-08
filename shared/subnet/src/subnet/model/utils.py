@@ -6,6 +6,8 @@ from transformers import AutoModelForCausalLM, AutoConfig
 import torch
 import numpy as np
 
+from subnet.model import gpu_device
+
 
 # OBSOLETE
 def load_model_from_hf(model_name: str, pretrained: bool, device: Union[str, torch.device]):
@@ -46,7 +48,7 @@ def compute_loss(
     Returns:
         torch.Tensor: Computed loss
     """
-    log_cuda_memory_usage(note="before loss computation")
+    log_gpu_memory_usage(note="before loss computation")
     start_time = time.time()
     if mock:
         loss = logits.sum()
@@ -59,7 +61,7 @@ def compute_loss(
     shift_logits = logits_gpu[..., :-1, :].contiguous()
     shift_labels = targets_gpu[..., 1:].contiguous()
 
-    log_cuda_memory_usage(note="after allocating loss memory")
+    log_gpu_memory_usage(note="after allocating loss memory")
 
     if not pack:
         # If sample packing is not used,
@@ -84,7 +86,7 @@ def compute_loss(
 
     # del logits_gpu, targets_gpu # NOTE: possibly causing the last-layer's inputs to no longer have .grad
 
-    log_cuda_memory_usage(note="after loss computation")
+    log_gpu_memory_usage(note="after loss computation")
 
     return loss
 
@@ -342,16 +344,15 @@ def unpack_int8_with_meta(packed: torch.Tensor, codes_shape: list[int]) -> Tuple
     return codes, {"scale": scale, "offset": offset}
 
 
-def log_cuda_memory_usage(note: str):
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
-        allocated_memory = torch.cuda.memory_allocated() / 1024**3  # GB
-        logger.info(f"GPU memory usage: {allocated_memory:.2f}GB / {total_memory:.2f}GB -- {note}")
+def log_gpu_memory_usage(note: str):
+    gpu_device.empty_cache()
+    gpu_device.synchronize()
+    total_memory = gpu_device.total_memory() / 1024**3  # GB
+    allocated_memory = gpu_device.allocated_memory() / 1024**3  # GB
+    logger.info(f"GPU memory usage: {allocated_memory:.2f}GB / {total_memory:.2f}GB -- {note}")
 
-        if allocated_memory > total_memory * 0.8:  # If more than 80% already used
-            logger.warning(f"High GPU memory usage detected: {allocated_memory:.2f}GB -- {note}")
+    if allocated_memory > total_memory * 0.8:  # If more than 80% already used
+        logger.warning(f"High GPU memory usage detected: {allocated_memory:.2f}GB -- {note}")
 
 
 def dequantize_nd_tensor_uint8_uniform(x: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -488,10 +489,9 @@ def convert_dtype_string(dtype_str: str):
 
 def _clean_gpu_memory():
     """Force cleanup of GPU memory."""
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()  # wait for all in-flight kernels
-        torch.cuda.empty_cache()  # release unused cached blocks
-        torch.cuda.synchronize()  # (optional) make sure the allocator work is finished
+    gpu_device.synchronize()  # wait for all in-flight kernels
+    gpu_device.empty_cache()  # release unused cached blocks
+    gpu_device.synchronize()  # (optional) make sure the allocator work is finished
 
     gc.collect()
-    log_cuda_memory_usage(note="after cleaning")
+    log_gpu_memory_usage(note="after cleaning")

@@ -56,7 +56,7 @@ async def download_partition_optimizer(partition: MinerPartition) -> torch.Tenso
     return optimizer_state
 
 
-async def download_partitions(
+async def download_merged_partitions(
     merged_partitions: list[MinerPartition],
     target_tensor: torch.Tensor,
     device: str,
@@ -88,27 +88,26 @@ async def download_partitions(
         # Check for nans and infs in the weights
         check_for_nans_and_infs(target_tensor, "current weights", exception_type=NanInfWarning)
 
-        num_tensors = target_tensor.numel()
-
         total_tensors_downloaded: int = 0
+        total_shard_elements_downloaded: int = 0
 
-        # Build all partition data first
-        new_partitions: list[MinerPartition] = []
-        for partition in merged_partitions:
-            new_partitions.append(partition)
-
-        # Process partitions in batches of DOWNLOAD_BATCH_SIZE
-        logger.info(
-            f"Starting batched download of {len(new_partitions)} weight/optimizer pairs in batches of {common_settings.DOWNLOAD_BATCH_SIZE}"
+        BATCH_DOWNLOAD_SIZE = (
+            common_settings.DOWNLOAD_BATCH_SIZE
+            if len(merged_partitions) > common_settings.DOWNLOAD_BATCH_SIZE
+            else len(merged_partitions)
         )
 
-        # Batch the downloads (same number for weights and optimizer state, so it's technically 2 * DOWNLOAD_BATCH_SIZE)
-        for batch_start in range(0, len(new_partitions), common_settings.DOWNLOAD_BATCH_SIZE):
-            batch_end = min(batch_start + common_settings.DOWNLOAD_BATCH_SIZE, len(new_partitions))
-            batch_partitions = new_partitions[batch_start:batch_end]
+        logger.info(
+            f"Starting batched download of {len(merged_partitions)} partitions in batches of {BATCH_DOWNLOAD_SIZE}"
+        )
+
+        # Batch the downloads
+        for batch_start in range(0, len(merged_partitions), BATCH_DOWNLOAD_SIZE):
+            batch_end = min(batch_start + BATCH_DOWNLOAD_SIZE, len(merged_partitions))
+            batch_partitions = merged_partitions[batch_start:batch_end]
 
             logger.info(
-                f"Processing batch {batch_start // common_settings.DOWNLOAD_BATCH_SIZE + 1}/{(len(new_partitions) + common_settings.DOWNLOAD_BATCH_SIZE - 1) // common_settings.DOWNLOAD_BATCH_SIZE}: partitions {batch_start} to {batch_end - 1}"
+                f"Processing batch {batch_start // BATCH_DOWNLOAD_SIZE + 1}/{(len(merged_partitions) + BATCH_DOWNLOAD_SIZE - 1) // BATCH_DOWNLOAD_SIZE}: partitions {batch_start} to {batch_end - 1}"
             )
 
             try:
@@ -134,8 +133,11 @@ async def download_partitions(
 
                 downloaded_tensors = filter_exceptions(downloaded_tensors)
 
+                logger.info(
+                    f"Percentage of downloaded tensors filtered: {len(downloaded_tensors) / len(batch_partitions) * 100}%"
+                )
+
                 # Process downloaded tensors and apply to model
-                # Tensors come in pairs: [weight0, opt0, weight1, opt1, ...]
                 for tensor_shard, partition in zip(downloaded_tensors, batch_partitions):
                     # If either of the downloads fail, we want to discard the shards.
                     if isinstance(tensor_shard, Exception):
@@ -167,22 +169,21 @@ async def download_partitions(
                     )
                     target_tensor[start_idx:end_idx] = tensor_shard
 
-                    total_tensors_downloaded += tensor_shard.numel()
+                    total_shard_elements_downloaded += tensor_shard.numel()
+                    total_tensors_downloaded += 1
 
                     logger.debug(f"Applied partition {partition.chunk_number}: {download_type}[{start_idx}:{end_idx}]")
 
             except Exception as e:
-                logger.warning(
-                    f"Error in batched download for batch {batch_start // common_settings.DOWNLOAD_BATCH_SIZE + 1}: {e}"
-                )
-                partition_download_error_counter += common_settings.DOWNLOAD_BATCH_SIZE
+                logger.warning(f"Error in batched download for batch {batch_start // BATCH_DOWNLOAD_SIZE + 1}: {e}")
+                partition_download_error_counter += BATCH_DOWNLOAD_SIZE
                 continue
 
         logger.debug(
             f"Downloaded {total_parts - partition_download_error_counter} / {total_parts} partitions inside download_partitions"
         )
         logger.info(
-            f"download_partitions downloaded {total_tensors_downloaded} / {num_tensors} ({(total_tensors_downloaded/num_tensors)*100}%) {download_type}"
+            f"download_partitions downloaded {total_shard_elements_downloaded} / {target_tensor.numel()} ({(total_shard_elements_downloaded/target_tensor.numel())*100}%) {download_type}"
         )
 
         # Cast the model weights and optimizer state to the correct device.
