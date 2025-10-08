@@ -3,7 +3,6 @@ from typing import Optional
 import bittensor as bt
 from common import settings as common_settings
 from common.utils.formulas import calculate_n_partitions
-from subnet.utils.vector_utils import flatten_optimizer_state, reconstruct_optimizer_state
 import torch
 from loguru import logger
 
@@ -14,7 +13,7 @@ from common.utils.shared_states import LayerPhase
 from subnet.model.model_mixin import ModelManager
 from subnet.utils.bt_utils import get_wallet
 from subnet.common_api_client import CommonAPIClient
-from subnet.utils.partition_utils import download_partitions
+from subnet.utils.partition_utils import download_merged_partitions
 
 
 class BaseNeuron:
@@ -64,8 +63,8 @@ class BaseNeuron:
             )
 
             # this is a deterministic number based on the config.
-            n_miners = (common_settings.MAX_NUM_MINERS // self.model_manager.model_metadata["n_splits"]) + 1
-            self.num_partitions = calculate_n_partitions(n_miners=n_miners)
+            n_miners_per_layer = (common_settings.MAX_NUM_MINERS // self.model_manager.model_metadata["n_splits"]) + 1
+            self.num_partitions = calculate_n_partitions(n_miners=n_miners_per_layer)
             logger.info(f"Number of partitions used for butterfly-reduce: {self.num_partitions}")
 
         except Exception as e:
@@ -98,7 +97,7 @@ class BaseNeuron:
                 return
 
             # Download new weights
-            new_weights = await download_partitions(
+            new_weights = await download_merged_partitions(
                 merged_partitions=merged_partitions,
                 target_tensor=old_weights,
                 device=device,
@@ -111,32 +110,9 @@ class BaseNeuron:
                 logger.warning("No new weights or optimizer state downloaded")
                 return
 
-            # If you're a new miner, or are registering with the orch, we download a previously determined valid optimizer state.
-            new_local_optimizer_state = None
-            if download_local_optimizer_state:
-                flat_optimizer_state, tensor_shapes, state_dict = flatten_optimizer_state(
-                    self.model_manager.optimizer, device=device
-                )
-
-                downloaded_flat_local_opt_state: torch.Tensor | None = await download_partitions(
-                    merged_partitions=merged_partitions,
-                    target_tensor=flat_optimizer_state,
-                    device=device,
-                    layer=self.layer,
-                    num_partitions=self.num_partitions,
-                    download_type="local_optimizer_state",
-                )
-
-                if downloaded_flat_local_opt_state is not None:
-                    new_local_optimizer_state: dict = reconstruct_optimizer_state(
-                        flat_tensor=downloaded_flat_local_opt_state,
-                        tensor_shapes=tensor_shapes,
-                        state_dict=state_dict,
-                    )
-
             # Set new weights and optimizer state to model
             await self.model_manager.set_model_weights_and_optimizer_state(
-                model_weights=new_weights, optimizer_state=new_local_optimizer_state
+                model_weights=new_weights, optimizer_state=None
             )
 
         except Exception as e:

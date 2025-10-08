@@ -14,7 +14,6 @@ from miner.state_manager import StateManager
 from miner.utils.activation_utils import download_sample
 from subnet.utils.s3_torch import download_tensor
 from subnet.model.model_mixin import ModelManager
-from miner import settings as miner_settings
 from common.utils.exceptions import LayerStateException, MinerNotRegisteredException
 
 
@@ -46,6 +45,7 @@ class ActivationQueue:
         self._backward_queue: deque[ActivationData] = deque()
         self._activation_fetcher_task: asyncio.Task | None = None
         self._model_manager: ModelManager | None = None
+        self._queue_size: int = common_settings.MAX_ACTIVATION_CACHE_SIZE * 2
 
     def __len__(self) -> int:
         """Get the number of activations in the queue."""
@@ -143,12 +143,10 @@ class ActivationQueue:
             self._cache.cleanup()
 
             async with self._queue_lock:
-                logger.debug(f"Max queue size: {miner_settings.MAX_ACTIVATION_QUEUE_SIZE}")
+                logger.debug(f"Max queue size: {self._queue_size}")
                 queue_status = f"backward: {[a.activation_id for a in self._backward_queue]} forward: {[a.activation_id for a in self._forward_queue]}"
                 logger.debug(f"Queue status: {queue_status}")
-                queue_slots = (
-                    miner_settings.MAX_ACTIVATION_QUEUE_SIZE - len(self._backward_queue) - len(self._forward_queue)
-                )
+                queue_slots = self._queue_size - len(self._backward_queue) - len(self._forward_queue)
 
             missing_backwards = len(self._cache) - len(self._backward_queue)
             n_fwd_activations = queue_slots - missing_backwards  # Leave room for missing backwards activations
@@ -396,17 +394,16 @@ class ActivationQueue:
     async def _filter_excess_forwards(self, forward_response: list[ActivationResponse]) -> list[ActivationResponse]:
         """Remove excess forward activations to make sure we leave room for backwards activations in the queue."""
         async with self._queue_lock:
-            max_forwards_in_process = miner_settings.MAX_ACTIVATION_QUEUE_SIZE
             forwards_in_process = len(self._forward_queue) + len(self._cache)
             received_forwards = len(forward_response)
 
             # If we have too many forwards in process, discard all forward responses
-            if forwards_in_process >= max_forwards_in_process:
+            if forwards_in_process >= self._queue_size:
                 logger.debug("Removing all forward activations from response to make way for backward activations")
                 return []
 
             # If the response contains too many forwards, crop it down to the max
-            removal_amount = received_forwards + forwards_in_process - max_forwards_in_process
+            removal_amount = received_forwards + forwards_in_process - self._queue_size
             if removal_amount > 0:
                 forward_response = forward_response[:-removal_amount]
                 logger.debug(

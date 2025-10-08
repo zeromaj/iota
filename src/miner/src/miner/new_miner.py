@@ -50,7 +50,7 @@ from common.utils.shared_states import LayerPhase
 from common.models.run_flags import RUN_FLAGS  # noqa: F401
 from subnet.base.base_neuron import BaseNeuron
 from subnet.miner_api_client import MinerAPIClient
-from subnet.model.utils import _clean_gpu_memory, log_cuda_memory_usage
+from subnet.model.utils import _clean_gpu_memory, log_gpu_memory_usage
 from subnet.test_client import TestAPIClient
 from subnet.utils.partition_utils import (
     MergingPartition,
@@ -59,6 +59,7 @@ from subnet.utils.partition_utils import (
 )
 from subnet.utils.vector_utils import check_for_nans_and_infs
 from miner.training import TrainingPhase
+from subnet.model import gpu_device
 
 
 class Miner(BaseNeuron, HealthServerMixin):
@@ -99,9 +100,8 @@ class Miner(BaseNeuron, HealthServerMixin):
                         continue
 
                     # Final memory check after loading
-                    if torch.cuda.is_available():
-                        allocated_memory = torch.cuda.memory_allocated() / 1024**3  # GB
-                        logger.debug(f"💾 GPU memory: {allocated_memory:.2f}GB")
+                    allocated_memory = gpu_device.allocated_memory() / 1024**3  # GB
+                    logger.debug(f"💾 GPU memory: {allocated_memory:.2f}GB")
 
                     logger.info(
                         f"🔄 Miner {self.hotkey[:8]} in Layer {self.state_manager.layer} is in state: {self.miner_api_client.layer_state}"
@@ -529,10 +529,10 @@ class Miner(BaseNeuron, HealthServerMixin):
 
             # Determine if we have enough memory in the GPU to merge the partitions on GPU or CPU
             device = miner_settings.DEVICE
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                avail_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            if device != "cpu":
+                gpu_device.synchronize()
+                gpu_device.empty_cache()
+                avail_memory = gpu_device.available_memory()
                 # TODO: @cassova: correct this calculation - 100x is just to push it to cpu for now
                 need_to_merge_on_gpu = (
                     100
@@ -551,7 +551,7 @@ class Miner(BaseNeuron, HealthServerMixin):
                 old_model = copy.deepcopy(self.model_manager.model).cpu()
             else:
                 old_model = copy.deepcopy(self.model_manager.model)
-                log_cuda_memory_usage(note="after copying old model")
+                log_gpu_memory_usage(note="after copying old model")
             torch.nn.utils.vector_to_parameters(
                 load_model_weights(
                     hotkey=self.hotkey, run_id=self.state_manager.run_id, layer_idx=self.state_manager.layer
@@ -570,7 +570,7 @@ class Miner(BaseNeuron, HealthServerMixin):
                 device=device,
             )
             logger.debug(f"{len(merged_partitions)} batch partitions merged")
-            log_cuda_memory_usage(note=f"after merging partitions on {device}")
+            log_gpu_memory_usage(note=f"after merging partitions on {device}")
 
             # Upload the merged partitions to the database and return list of MinerPartition
             final_partitions = await upload_partition_batch(
@@ -584,9 +584,9 @@ class Miner(BaseNeuron, HealthServerMixin):
             await self.miner_api_client.submit_merged_partitions(merged_partitions=final_partitions)
             logger.debug(f"{len(final_partitions)} batch partitions submitted")
 
-            self.model_manager.model.to(miner_settings.DEVICE)
+            self.model_manager.model = self.model_manager.model.to(miner_settings.DEVICE)
 
             del old_model
             del merged_partitions  # TODO: @cassova: do a better job of cleaning this up
             del final_partitions  # TODO: @cassova: do a better job of cleaning this up
-            log_cuda_memory_usage(note="after merging partitions")
+            log_gpu_memory_usage(note="after merging partitions")

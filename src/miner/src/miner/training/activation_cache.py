@@ -6,8 +6,8 @@ from loguru import logger
 
 from common import settings as common_settings
 from subnet.miner_api_client import MinerAPIClient
-from miner import settings as miner_settings
 from common.utils.exceptions import LayerStateException, MinerNotRegisteredException
+from subnet.model import gpu_device
 
 
 class ActivationData(BaseModel):
@@ -75,15 +75,14 @@ class ActivationCache:
                     del activation_data.output_activations
                 del self._cache[activation_id]
 
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                gpu_device.empty_cache()
             except Exception as e:
                 logger.error(f"Error removing activation {activation_id} from cache: {e}")
                 raise
 
     def is_full(self) -> bool:
         """Check if the cache is full."""
-        if len(self._cache) >= miner_settings.ACTIVATION_CACHE_SIZE:
+        if len(self._cache) >= common_settings.MAX_ACTIVATION_CACHE_SIZE:
             logger.info(
                 f"Miner {self._hotkey[:8]} cache full with {len(self._cache)} activations: {self._cache.keys()}"
             )
@@ -172,6 +171,4 @@ class ActivationCache:
             logger.error(f"Error during cache reset, waiting for removal tasks to complete: {e}")
             raise
         finally:
-            self._removal_tasks.clear()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            gpu_device.empty_cache()

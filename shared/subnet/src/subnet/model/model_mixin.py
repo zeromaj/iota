@@ -7,7 +7,7 @@ from common.utils.exceptions import NanInfException
 from loguru import logger
 from subnet.model.loaders import load_model_split
 from subnet.model.tokenizer import load_tokenizer
-from subnet.model.utils import _clean_gpu_memory, log_cuda_memory_usage
+from subnet.model.utils import _clean_gpu_memory, log_gpu_memory_usage
 from subnet.utils.vector_utils import add_artificial_gradients, check_for_nans_and_infs
 
 
@@ -90,7 +90,7 @@ class ModelManager:
                 _clean_gpu_memory()
 
                 # Check GPU memory before loading model
-                log_cuda_memory_usage(note="before model load")
+                log_gpu_memory_usage(note="before model load")
 
                 # Load a newly initialized model (ie: has random weights)
                 await self._load_model(layer=layer)
@@ -115,7 +115,7 @@ class ModelManager:
                     await self._load_vocab_info()
 
                 # Final memory check after loading
-                log_cuda_memory_usage(note="after model load")
+                log_gpu_memory_usage(note="after model load")
 
                 logger.success(f"✅ Model loaded successfully {self.logger_attributes['hotkey'][:8]}")
 
@@ -125,7 +125,7 @@ class ModelManager:
 
     async def _forward(self, layer: int, input_activations: torch.Tensor) -> tuple[torch.Tensor, dict]:
         with logger.contextualize(gpu="forward pass"):
-            log_cuda_memory_usage(note="before forward pass")
+            log_gpu_memory_usage(note="before forward pass")
 
             if layer > 0:
                 input_activations.requires_grad_(True)
@@ -136,7 +136,7 @@ class ModelManager:
                 f"output activations with shape {output_activations.shape} for {self.logger_attributes['hotkey'][:8]} on layer {layer}"
             )
 
-            log_cuda_memory_usage(note="after forward pass")
+            log_gpu_memory_usage(note="after forward pass")
             return output_activations, state
 
     async def _backward(
@@ -147,7 +147,7 @@ class ModelManager:
         state: dict,
     ):
         with logger.contextualize(gpu="backward pass"):
-            log_cuda_memory_usage(note="before backward pass")
+            log_gpu_memory_usage(note="before backward pass")
 
             # If this is the last layer, then output_activations is the loss
             if layer == self.model_metadata["n_splits"] - 1:
@@ -168,7 +168,7 @@ class ModelManager:
                     logger.error(f"Error during backward step: {e}")
                     raise
 
-            log_cuda_memory_usage(note="after backward pass")
+            log_gpu_memory_usage(note="after backward pass")
 
     async def clip_gradients(self):
         total_model_params: int = sum(p.numel() for p in self.model.parameters())
@@ -305,12 +305,12 @@ class ModelManager:
 
         with logger.contextualize(gpu="local optimization step"):
             logger.info(f"{self.logger_attributes['hotkey'][:8]} is beginning local optimization step")
-            log_cuda_memory_usage(note="before local optimization step")
+            log_gpu_memory_usage(note="before local optimization step")
 
             # Clip the gradients
             await self.clip_gradients()
 
-            log_cuda_memory_usage(note="after clipping gradients")
+            log_gpu_memory_usage(note="after clipping gradients")
 
             # Step the optimizer
             if learning_rate is None:
@@ -324,7 +324,7 @@ class ModelManager:
             self.optimizer.step()
             self.optimizer.zero_grad()
 
-            log_cuda_memory_usage(note="after stepping optimizer")
+            log_gpu_memory_usage(note="after stepping optimizer")
 
             # TODO: Remove this once we have a better way to handle local optimization step.
             # If a miner registers at a later epoch that epoch = 1, their local optimizer can be completely bogus.
@@ -342,12 +342,12 @@ class ModelManager:
                 torch.nn.utils.vector_to_parameters(loaded_weights, self.model.parameters())
 
             logger.info(f"{self.logger_attributes['hotkey'][:8]} completed local optimization step")
-            log_cuda_memory_usage(note="after local optimization step")
+            log_gpu_memory_usage(note="after local optimization step")
 
     def reset(self):
         """Needs to reset all the attributes of the class"""
         with logger.contextualize(gpu="reset"):
-            log_cuda_memory_usage(note="before reset")
+            log_gpu_memory_usage(note="before reset")
 
             # Need to delete these because of memory concerns.
             del self.model

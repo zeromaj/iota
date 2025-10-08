@@ -9,7 +9,7 @@ import aiohttp
 from common.utils.exceptions import NanInfWarning
 from common.models.miner_models import ChunkMetadata
 from common.models.run_flags import RUN_FLAGS
-from subnet.model.utils import log_cuda_memory_usage
+from subnet.model.utils import log_gpu_memory_usage
 from subnet.utils.vector_utils import check_for_nans_and_infs
 
 import torch
@@ -66,7 +66,7 @@ async def download_tensor(
     Returns:
         Downloaded tensor
     """
-    log_cuda_memory_usage(note="before downloading tensor")
+    log_gpu_memory_usage(note="before downloading tensor")
 
     # Determine if we need to manage the session ourselves
     for attempt in range(max_retries + 1):
@@ -82,7 +82,7 @@ async def download_tensor(
 
             check_for_nans_and_infs(loaded_tensor, f"tensor downloaded from {path}", exception_type=NanInfWarning)
 
-            log_cuda_memory_usage(note="after downloading tensor")
+            log_gpu_memory_usage(note="after downloading tensor")
 
             return loaded_tensor
 
