@@ -1,6 +1,6 @@
 from typing import Literal
 from fastapi import HTTPException
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from common import settings
 from common.models.ml_models import ModelConfig, ModelMetadata
@@ -46,12 +46,6 @@ class GetTargetsRequest(BaseModel):
     activation_id: str | None = None
 
 
-class SubmitActivationRequest(BaseModel):
-    direction: Literal["forward", "backward"]
-    activation_id: str | None = None
-    activation_path: str | None = None
-
-
 class SyncActivationAssignmentsRequest(BaseModel):
     activation_ids: list[str]
 
@@ -92,6 +86,7 @@ class ActivationResponse(BaseModel):
     upload_id: str | None = None
     presigned_download_url: str | None = None
     reason: str | None = None
+    attestation_challenge_blob: str | None = None
 
 
 class SubmittedWeightsAndOptimizerPresigned(BaseModel):
@@ -194,8 +189,31 @@ class GetActivationRequest(BaseModel):
     n_fwd_activations: int = 1
 
 
+class MinerAttestationRuntime(BaseModel):
+    duration_ms: float
+    delay_suspect: bool
+
+
+class MinerAttestationPayload(BaseModel):
+    payload_blob: str
+    runtime: MinerAttestationRuntime | None = Field(default=None, exclude=True, repr=False)
+
+
+class AttestationChallengeResponse(BaseModel):
+    challenge_blob: str
+
+
+class SubmitActivationRequest(BaseModel):
+    direction: Literal["forward", "backward"]
+    activation_id: str | None = None
+    activation_path: str | None = None
+    attestation: MinerAttestationPayload | None = None
+
+
 class RegisterMinerRequest(BaseModel):
     run_id: str
+    coldkey: str | None = None  # (optional for miner pool miners)
+    attestation: MinerAttestationPayload | None = None
 
 
 class RunInfo(BaseModel):

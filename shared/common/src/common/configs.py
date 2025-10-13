@@ -23,6 +23,8 @@ LLAMA32_CONFIG_100M = {
     },
     "model_splits": [[-1, 3], [3, -1]],
     # "model_splits": [[-1, 2], [2, 4], [4, -1]],
+    "miners_per_layer": [1, 2],
+    # "miners_per_layer": [1, 1, 2],
 }
 
 LLAMA32_CONFIG_1B = {
@@ -50,6 +52,7 @@ LLAMA32_CONFIG_1B = {
     },
     "model_splits": [[-1, 5], [5, 10], [10, -1]],
     # "model_splits": [[-1, 2], [2, 6], [6, 10], [10, 14], [14, -1]],
+    "miners_per_layer": [1, 1, 2],
 }
 
 LLAMA32_CONFIG_3B = {
