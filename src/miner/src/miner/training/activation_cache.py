@@ -8,6 +8,7 @@ from common import settings as common_settings
 from subnet.miner_api_client import MinerAPIClient
 from common.utils.exceptions import LayerStateException, MinerNotRegisteredException
 from subnet.model import gpu_device
+from miner import settings as miner_settings
 
 
 class ActivationData(BaseModel):
@@ -18,6 +19,7 @@ class ActivationData(BaseModel):
     output_activations: torch.Tensor | None
     state: dict | None
     upload_time: float
+    attestation_challenge_blob: str | None = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -82,7 +84,7 @@ class ActivationCache:
 
     def is_full(self) -> bool:
         """Check if the cache is full."""
-        if len(self._cache) >= common_settings.MAX_ACTIVATION_CACHE_SIZE:
+        if len(self._cache) >= miner_settings.MAX_ACTIVATION_CACHE_SIZE:
             logger.info(
                 f"Miner {self._hotkey[:8]} cache full with {len(self._cache)} activations: {self._cache.keys()}"
             )
@@ -119,9 +121,11 @@ class ActivationCache:
             for activation_id, activation_data in list(self._cache.items()):
                 upload_time = activation_data.upload_time
                 if upload_time < time.time() - common_settings.ACTIVATION_CACHE_TIMEOUT:
-                    # Explicitly remove tensor references to help the gc
-                    self._removal_tasks.append(asyncio.create_task(self.remove(activation_id)))
-                    logger.warning(f"🗑️ Removing timed out activation from cache: {activation_id}")
+                    # Kick off a sync and let that remove any activations that have since been
+                    # unassigned from the miner.
+                    if not self._sync_lock.locked():
+                        # Run sync concurrently so we don't block the main thread
+                        self._sync_task = asyncio.create_task(self.sync())
 
     async def reset(self):
         """Reset the cache."""

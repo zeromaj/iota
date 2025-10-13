@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 from loguru import logger
+from miner.utils.timer_logger import TimerLogger
 import torch
 import time
 from pydantic import BaseModel
@@ -15,6 +16,7 @@ from miner.utils.activation_utils import download_sample
 from subnet.utils.s3_torch import download_tensor
 from subnet.model.model_mixin import ModelManager
 from common.utils.exceptions import LayerStateException, MinerNotRegisteredException
+from miner import settings as miner_settings
 
 
 class DownloadedData(BaseModel):
@@ -45,7 +47,8 @@ class ActivationQueue:
         self._backward_queue: deque[ActivationData] = deque()
         self._activation_fetcher_task: asyncio.Task | None = None
         self._model_manager: ModelManager | None = None
-        self._queue_size: int = common_settings.MAX_ACTIVATION_CACHE_SIZE * 2
+        self._max_forwards_in_queue: int = miner_settings.MAX_FORWARD_ACTIVATIONS_IN_QUEUE
+        self._min_forwards_in_queue: int = miner_settings.MIN_FORWARD_ACTIVATIONS_IN_QUEUE
 
     def __len__(self) -> int:
         """Get the number of activations in the queue."""
@@ -97,7 +100,17 @@ class ActivationQueue:
                 if timeout > 0 and time.time() - start_time > timeout:
                     raise Exception("Timeout getting activation")
                 # logger.debug("Queue is empty, waiting for more activations")  # produces too many logs
-                await asyncio.sleep(0.1)
+                async with TimerLogger(
+                    name="get_activation_sleep",
+                    metadata={
+                        "hotkey": self._miner_api_client.hotkey.ss58_address,
+                        "layer": self._state_manager.layer,
+                        "backward_queue": len(self._backward_queue),
+                        "forward_queue": len(self._forward_queue),
+                        "cache": len(self._cache),
+                    },
+                ):
+                    await asyncio.sleep(0.1)  # prevent CPU from being blocked
                 continue
             except Exception as e:
                 logger.error(f"Error getting activation from queue: {e}")
@@ -138,188 +151,216 @@ class ActivationQueue:
         """Fetch activations from the miner API and add them to the queue."""
         while True:
             # This loop will only break if `get_activation` raises an exception (i.e. LayerStateException)
+            await asyncio.sleep(0.01)
 
-            # Keep cache clean
-            self._cache.cleanup()
+            async with TimerLogger(
+                name="fetch_activations",
+                metadata={"hotkey": self._miner_api_client.hotkey.ss58_address, "layer": self._state_manager.layer},
+            ):
+                # Keep cache clean
+                self._cache.cleanup()
 
-            async with self._queue_lock:
-                logger.debug(f"Max queue size: {self._queue_size}")
-                queue_status = f"backward: {[a.activation_id for a in self._backward_queue]} forward: {[a.activation_id for a in self._forward_queue]}"
-                logger.debug(f"Queue status: {queue_status}")
-                queue_slots = self._queue_size - len(self._backward_queue) - len(self._forward_queue)
-
-            missing_backwards = len(self._cache) - len(self._backward_queue)
-            n_fwd_activations = queue_slots - missing_backwards  # Leave room for missing backwards activations
-            if n_fwd_activations < 0:
-                n_fwd_activations = 0
-            logger.debug(
-                f"Queue slots available: {queue_slots}"
-                f" -- Missing backwards: {missing_backwards}"
-                f" -- Forward activation reqs: {n_fwd_activations}"
-            )
-
-            try:
-                response: list[ActivationResponse] = await self._miner_api_client.get_activations(
-                    get_activation_request=GetActivationRequest(n_fwd_activations=n_fwd_activations)
-                )
-                logger.debug(f"Received activations: {len(response)}")
-            except RateLimitException:
-                logger.warning("Rate limit exceeded")
-                await asyncio.sleep(1)
-                continue
-            except LayerStateException as e:
-                logger.warning(f"Layer state changing while getting activations: {e}")
-                raise
-            except MinerNotRegisteredException as e:
-                logger.warning(f"Miner no longer registered while getting activations: {e}")
-                raise
-            except Exception as e:
-                logger.exception(f"Error getting activations from orchestrator: {e}")
-                raise
-
-            if len(response) == 0:
-                logger.warning("No activations received from orchestrator")
-                continue
-
-            logger.debug(f"Response contains: {[(a.activation_id, a.direction) for a in response]}")
-
-            # Filter the response
-            response = await self._filter_duplicates(response=response)  # do this before we split
-            backward_response, forward_response = await self._split_responses(response=response)
-            logger.debug(
-                f"Forward response prior to excess filtering: {[(a.activation_id, a.direction) for a in forward_response]}"
-            )
-            forward_response = await self._filter_excess_forwards(forward_response=forward_response)
-
-            if len(backward_response) == 0 and len(forward_response) == 0:
-                logger.warning("No activations to download")
-                continue
-
-            logger.debug(
-                f"After filtering, downloading activations {len(backward_response)} backward: {[(a.activation_id, a.direction) for a in backward_response]}"
-            )
-            logger.debug(
-                f"After filtering, downloading activations: {len(forward_response)} forward: {[(a.activation_id, a.direction) for a in forward_response]}"
-            )
-
-            # Download the activations
-            download_tasks = [
-                asyncio.create_task(self._download_activations(activation_response=r)) for r in backward_response
-            ]
-            download_tasks.extend(
-                [asyncio.create_task(self._download_activations(activation_response=r)) for r in forward_response]
-            )
-            logger.debug(f"Downloading {len(download_tasks)} activations")
-
-            completed_tasks = set()
-            for task in asyncio.as_completed(download_tasks):
-                try:
-                    downloaded_data: DownloadedData = await task
-                    completed_tasks.add(task)
-                except asyncio.TimeoutError:
-                    logger.warning("Timeout downloading activation -- skipping")
-                    continue
-                except asyncio.CancelledError:
-                    logger.warning("Download task cancelled -- skipping")
-                    continue
-                except (LayerStateException, MinerNotRegisteredException) as e:
-                    logger.warning(f"Anticipated exception has occurred while downloading activations: {e}")
-                    self._cancel_tasks(tasks=download_tasks, completed_tasks=completed_tasks)
-                    raise
-                except Exception as e:
-                    logger.error(f"Error downloading activation -- skipping: {e}")
-                    continue
-                activation_response = downloaded_data.activation_response
-                entry = ActivationData(
-                    activation_id=activation_response.activation_id,
-                    direction=activation_response.direction,
-                    input_activations=downloaded_data.input_activations,
-                    sample_activations=downloaded_data.sample_activations,
-                    output_activations=None,
-                    state=None,
-                    upload_time=time.time(),
+                # Log cache and queue status
+                cache_vacancy = miner_settings.MAX_ACTIVATION_CACHE_SIZE - len(self._cache)
+                logger.debug(
+                    f"Cache size: {len(self._cache)}/{miner_settings.MAX_ACTIVATION_CACHE_SIZE} (vacancy: {cache_vacancy})"
                 )
                 logger.debug(
-                    f"Downloaded activation {activation_response.activation_id} going {activation_response.direction}"
+                    f"Backward activations in queue: {len(self._backward_queue)}"
+                    f" - Forward activations in queue: {len(self._forward_queue)}"
+                    f" (min/max fwds: {self._min_forwards_in_queue}/{self._max_forwards_in_queue})"
                 )
-                async with self._queue_lock:
-                    if activation_response.direction == "backward":
-                        self._backward_queue.append(entry)
-                    else:
-                        self._forward_queue.append(entry)
+                queue_status = f"backward: {[a.activation_id for a in self._backward_queue]} forward: {[a.activation_id for a in self._forward_queue]}"
+                logger.debug(f"Queue status: {queue_status}")
+
+                max_allowed_total = (
+                    miner_settings.MAX_ACTIVATION_CACHE_SIZE + miner_settings.MIN_FORWARD_ACTIVATIONS_IN_QUEUE
+                )
+                used = len(self._cache) + len(self._forward_queue)
+                n_fwd_activations = min(max_allowed_total - used, miner_settings.MAX_FORWARD_ACTIVATIONS_IN_QUEUE)
+                missing_backwards = len(self._cache) - len(self._backward_queue)
+
+                if n_fwd_activations < 0:
+                    n_fwd_activations = 0
+                logger.debug(
+                    f"Max allowed forwards: {max_allowed_total}"
+                    f" -- Used: {used}"
+                    f" -- Forward activation reqs: {n_fwd_activations}"
+                    f" -- Missing backwards: {missing_backwards}"
+                )
+
+                if n_fwd_activations == 0 and missing_backwards == 0:
+                    # This can happen if our queue is full and we haven't yet processed anything into the cache
+                    logger.debug("No forward activations needed and no backwards activations needed")
+                    continue
+
+                try:
+                    response: list[ActivationResponse] = await self._miner_api_client.get_activations(
+                        get_activation_request=GetActivationRequest(n_fwd_activations=n_fwd_activations)
+                    )
+                    logger.debug(f"Received activations: {len(response)}")
+                except RateLimitException:
+                    logger.warning("Rate limit exceeded")
+                    await asyncio.sleep(1)
+                    continue
+                except LayerStateException as e:
+                    logger.warning(f"Layer state changing while getting activations: {e}")
+                    raise
+                except MinerNotRegisteredException as e:
+                    logger.warning(f"Miner no longer registered while getting activations: {e}")
+                    raise
+                except Exception as e:
+                    logger.exception(f"Error getting activations from orchestrator: {e}")
+                    raise
+
+                if len(response) == 0:
+                    logger.warning("No activations received from orchestrator")
+                    continue
+
+                logger.debug(f"Response contains: {[(a.activation_id, a.direction) for a in response]}")
+
+                # Filter the response
+                response = await self._filter_duplicates(response=response)  # do this before we split
+                backward_response, forward_response = await self._split_responses(response=response)
+                logger.debug(
+                    f"Forward response prior to excess filtering: {[(a.activation_id, a.direction) for a in forward_response]}"
+                )
+                forward_response = await self._filter_excess_forwards(forward_response=forward_response)
+
+                if len(backward_response) == 0 and len(forward_response) == 0:
+                    logger.warning("No activations to download")
+                    continue
+
+                logger.debug(
+                    f"After filtering, downloading activations {len(backward_response)} backward: {[(a.activation_id, a.direction) for a in backward_response]}"
+                )
+                logger.debug(
+                    f"After filtering, downloading activations: {len(forward_response)} forward: {[(a.activation_id, a.direction) for a in forward_response]}"
+                )
+
+                # Download the activations
+                download_tasks = [
+                    asyncio.create_task(self._download_activations(activation_response=r)) for r in backward_response
+                ]
+                download_tasks.extend(
+                    [asyncio.create_task(self._download_activations(activation_response=r)) for r in forward_response]
+                )
+                logger.debug(f"Downloading {len(download_tasks)} activations")
+
+                completed_tasks = set()
+                for task in asyncio.as_completed(download_tasks):
+                    try:
+                        downloaded_data: DownloadedData = await task
+                        completed_tasks.add(task)
+                    except asyncio.TimeoutError:
+                        logger.warning("Timeout downloading activation -- skipping")
+                        continue
+                    except asyncio.CancelledError:
+                        logger.warning("Download task cancelled -- skipping")
+                        continue
+                    except (LayerStateException, MinerNotRegisteredException) as e:
+                        logger.warning(f"Anticipated exception has occurred while downloading activations: {e}")
+                        self._cancel_tasks(tasks=download_tasks, completed_tasks=completed_tasks)
+                        raise
+                    except Exception as e:
+                        logger.error(f"Error downloading activation -- skipping: {e}")
+                        continue
+                    activation_response = downloaded_data.activation_response
+                    entry = ActivationData(
+                        activation_id=activation_response.activation_id,
+                        direction=activation_response.direction,
+                        input_activations=downloaded_data.input_activations,
+                        sample_activations=downloaded_data.sample_activations,
+                        output_activations=None,
+                        state=None,
+                        upload_time=time.time(),
+                        attestation_challenge_blob=activation_response.attestation_challenge_blob,
+                    )
+                    logger.debug(
+                        f"Downloaded activation {activation_response.activation_id} going {activation_response.direction}"
+                    )
+                    async with self._queue_lock:
+                        if activation_response.direction == "backward":
+                            self._backward_queue.append(entry)
+                        else:
+                            self._forward_queue.append(entry)
 
     async def _download_activations(self, activation_response: ActivationResponse) -> DownloadedData:
         """Download an activation from the API and return it."""
         # TODO: check if we actually need to download samples and tensors DIRECT to CUDA since these are loaded to CUDA
         # during their respective passes either way
         with logger.contextualize(activation_id=activation_response.activation_id):
-            try:
-                # Download the input activations
-                if activation_response.direction == "forward" and self._state_manager.layer == 0:
-                    input_activations = await asyncio.wait_for(
-                        download_sample(
-                            download_url=activation_response.presigned_download_url,
-                            tokenizer=self._model_manager.tokenizer,
-                            device="cpu",
-                        ),
-                        timeout=60,  # TODO: @cassova: this value should change based on activation size
-                    )
-                else:
-                    input_activations = await asyncio.wait_for(
-                        download_tensor(
-                            path=activation_response.presigned_download_url,
-                            device="cpu",
-                        ),
-                        timeout=60,  # TODO: @cassova: this value should change based on activation size
-                    )
-                    if not common_settings.MOCK:
-                        input_activations = input_activations.reshape(
-                            common_settings.MINI_BATCH_SIZE,
-                            common_settings.SEQUENCE_LENGTH,
-                            self._model_manager.model_config.get("bottleneck_dim")
-                            or self._model_manager.model_config["emb_dim"],
+            async with TimerLogger(
+                name="download_activations",
+                metadata={"activation_id": activation_response.activation_id},
+            ):
+                try:
+                    # Download the input activations
+                    if activation_response.direction == "forward" and self._state_manager.layer == 0:
+                        input_activations = await asyncio.wait_for(
+                            download_sample(
+                                download_url=activation_response.presigned_download_url,
+                                tokenizer=self._model_manager.tokenizer,
+                                device="cpu",
+                            ),
+                            timeout=60,  # TODO: @cassova: this value should change based on activation size
                         )
                     else:
-                        input_activations = input_activations.reshape(
-                            common_settings.MINI_BATCH_SIZE,
-                            100,
+                        input_activations = await asyncio.wait_for(
+                            download_tensor(
+                                path=activation_response.presigned_download_url,
+                                device="cpu",
+                            ),
+                            timeout=60,  # TODO: @cassova: this value should change based on activation size
                         )
+                        if not common_settings.MOCK:
+                            input_activations = input_activations.reshape(
+                                common_settings.MINI_BATCH_SIZE,
+                                common_settings.SEQUENCE_LENGTH,
+                                self._model_manager.model_config.get("bottleneck_dim")
+                                or self._model_manager.model_config["emb_dim"],
+                            )
+                        else:
+                            input_activations = input_activations.reshape(
+                                common_settings.MINI_BATCH_SIZE,
+                                100,
+                            )
 
-                # Download the sample for last layer miners as well
-                sample_activations = None
-                if (
-                    activation_response.direction == "forward"
-                    and self._state_manager.layer == self._model_manager.model_metadata["n_splits"] - 1
+                    # Download the sample for last layer miners as well
+                    sample_activations = None
+                    if (
+                        activation_response.direction == "forward"
+                        and self._state_manager.layer == self._model_manager.model_metadata["n_splits"] - 1
+                    ):
+                        logger.debug("Last layer miner, downloading sample activations")
+                        initial_activations_path = await self._miner_api_client.get_targets(
+                            get_targets_request=GetTargetsRequest(activation_id=activation_response.activation_id),
+                        )
+                        sample_activations = await asyncio.wait_for(
+                            download_sample(
+                                download_url=initial_activations_path,
+                                tokenizer=self._model_manager.tokenizer,
+                                device="cpu",
+                            ),
+                            timeout=60,  # TODO: @cassova: this value should change based on activation size
+                        )
+                    return DownloadedData(
+                        activation_response=activation_response,
+                        input_activations=input_activations,
+                        sample_activations=sample_activations,
+                    )
+                except (
+                    asyncio.TimeoutError,
+                    asyncio.CancelledError,
+                    LayerStateException,
+                    MinerNotRegisteredException,
                 ):
-                    logger.debug("Last layer miner, downloading sample activations")
-                    initial_activations_path = await self._miner_api_client.get_targets(
-                        get_targets_request=GetTargetsRequest(activation_id=activation_response.activation_id),
-                    )
-                    sample_activations = await asyncio.wait_for(
-                        download_sample(
-                            download_url=initial_activations_path,
-                            tokenizer=self._model_manager.tokenizer,
-                            device="cpu",
-                        ),
-                        timeout=60,  # TODO: @cassova: this value should change based on activation size
-                    )
-                return DownloadedData(
-                    activation_response=activation_response,
-                    input_activations=input_activations,
-                    sample_activations=sample_activations,
-                )
-            except (
-                asyncio.TimeoutError,
-                asyncio.CancelledError,
-                LayerStateException,
-                MinerNotRegisteredException,
-            ):
-                # Just raise these expected errors to be caught by the caller
-                raise
-            except Exception as e:
-                # For these unexpected errors, we want the stack trace
-                logger.exception(f"Failed downloading activation {activation_response.activation_id}: {e}")
-                raise
+                    # Just raise these expected errors to be caught by the caller
+                    raise
+                except Exception as e:
+                    # For these unexpected errors, we want the stack trace
+                    logger.exception(f"Failed downloading activation {activation_response.activation_id}: {e}")
+                    raise
 
     async def _split_responses(
         self, response: list[ActivationResponse]
@@ -393,17 +434,22 @@ class ActivationQueue:
 
     async def _filter_excess_forwards(self, forward_response: list[ActivationResponse]) -> list[ActivationResponse]:
         """Remove excess forward activations to make sure we leave room for backwards activations in the queue."""
+        if len(forward_response) == 0:
+            return forward_response
+
         async with self._queue_lock:
-            forwards_in_process = len(self._forward_queue) + len(self._cache)
+            forwards_in_queue = len(self._forward_queue)
             received_forwards = len(forward_response)
 
             # If we have too many forwards in process, discard all forward responses
-            if forwards_in_process >= self._queue_size:
+            if forwards_in_queue >= self._max_forwards_in_queue:
                 logger.debug("Removing all forward activations from response to make way for backward activations")
                 return []
 
             # If the response contains too many forwards, crop it down to the max
-            removal_amount = received_forwards + forwards_in_process - self._queue_size
+            # e.g. received_forwards = 8 - max_forwards_in_queue = 6 - forwards_in_queue = 1 = 3 (remove 3)
+            # e.g. received_forwards = 3 - max_forwards_in_queue = 6 - forwards_in_queue = 1 = -4 (remove 0)
+            removal_amount = received_forwards - self._max_forwards_in_queue - forwards_in_queue
             if removal_amount > 0:
                 forward_response = forward_response[:-removal_amount]
                 logger.debug(

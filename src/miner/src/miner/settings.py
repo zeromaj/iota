@@ -2,10 +2,13 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
+from common import settings as common_settings
+
 
 DOTENV_PATH = os.getenv("DOTENV_PATH", ".env")
 if not load_dotenv(dotenv_path=DOTENV_PATH):
     logger.warning("No .env file found for miner settings")
+
 
 # Wallet
 WALLET_NAME = os.getenv("MINER_WALLET", "test")
@@ -23,5 +26,13 @@ DEVICE = os.getenv("DEVICE", "cpu")
 TIMEOUT = int(os.getenv("MINER_TIMEOUT", "300"))  # 5 minutes default
 PACK_SAMPLES = os.getenv("PACK_SAMPLES", "True") == "True"  # not for miner's to change
 N_PARTITION_BATCHES = int(os.getenv("N_PARTITION_BATCHES", "10"))  # not for miner's to change
-
 PREVIOUS_WEIGHTS = os.getenv("MODEL_DIR", "./weights")
+
+# Activation settings - miners can reduce if they are OOM'ing but can't surpass common settings
+MAX_ACTIVATION_CACHE_SIZE = int(os.getenv("MAX_ACTIVATION_CACHE_SIZE", common_settings.MAX_ACTIVATION_CACHE_SIZE))
+MAX_FORWARD_ACTIVATIONS_IN_QUEUE = int(
+    os.getenv("MAX_FORWARD_ACTIVATIONS_IN_QUEUE", common_settings.MAX_FORWARD_ACTIVATIONS_IN_QUEUE)
+)
+MIN_FORWARD_ACTIVATIONS_IN_QUEUE = int(
+    os.getenv("MIN_FORWARD_ACTIVATIONS_IN_QUEUE", common_settings.MIN_FORWARD_ACTIVATIONS_IN_QUEUE)
+)

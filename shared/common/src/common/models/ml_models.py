@@ -55,3 +55,4 @@ class ModelMetadata(BaseModel):
     lr: LearningRateMetadata | None = None
     opt: OptimizerMetadata | None = None
     dataset: DatasetMetadata | None = None
+    miners_per_layer: list[int] | None = None
