@@ -8,7 +8,7 @@ from loguru import logger
 from common.models.run_flags import RUN_FLAGS
 
 
-async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries: int = 3) -> list[dict]:
+async def upload_parts(urls: list[str], data: bytes, upload_id: str | None, max_retries: int = 3) -> list[dict]:
     """Upload parts to S3 storage with retry logic.
 
     Args:
@@ -20,6 +20,17 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries
     Returns:
         list[dict]: The parts that were uploaded.
     """
+    if len(urls) > 1 and upload_id is None:
+        logger.exception("Upload ID is required for multipart uploads")
+    if len(urls) == 1 and upload_id is None:
+        return await upload_part(urls=urls, data=data, upload_id=upload_id, max_retries=max_retries)
+    else:
+        try:
+            assert upload_id is not None, "Upload ID is required for multipart uploads"
+        except Exception as e:
+            logger.exception(f"Error uploading parts: {e}")
+            raise
+
     # Configure timeout for S3 uploads - allow for larger files with reasonable timeout
     timeout = aiohttp.ClientTimeout(total=300, connect=30)  # 5 minute total, 30s connect
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -50,28 +61,6 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries
                             logger.error(f"Response Body: {error_body}")
                             logger.error(f"Request URL: {url}")
                             logger.error(f"Upload ID: {upload_id}")
-
-                            # Try to parse XML error if it's XML
-                            try:
-                                import xml.etree.ElementTree as ET
-
-                                root = ET.fromstring(error_body)
-                                error_code = root.find(".//Code")
-                                error_message = root.find(".//Message")
-                                request_id = root.find(".//RequestId")
-
-                                if error_code is not None:
-                                    logger.error(f"S3 Error Code: {error_code.text}")
-                                    # Check if this is a retryable timeout error
-                                    if error_code.text == "RequestTimeout":
-                                        raise Exception("RequestTimeout")
-                                if error_message is not None:
-                                    logger.error(f"S3 Error Message: {error_message.text}")
-                                if request_id is not None:
-                                    logger.error(f"S3 Request ID: {request_id.text}")
-                            except Exception as xml_parse_error:
-                                logger.debug(f"Could not parse S3 error XML: {xml_parse_error}")
-
                         response.raise_for_status()
 
                         # Extract ETag from response headers (remove quotes if present)
@@ -112,6 +101,71 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str, max_retries
                         logger.error(f"Upload failed for part {part_number} after {max_retries + 1} attempts: {e}")
                         raise
     return parts
+
+
+async def upload_part(urls: list[str], data: bytes, upload_id: str, max_retries: int = 3) -> list[dict]:
+    """Upload a single file to S3 storage with retry logic (non-multipart upload).
+
+    Args:
+        urls (list[str]): The URL to upload to (should contain a single URL).
+        data (bytes): The data to upload.
+        upload_id (str): The upload ID.
+        max_retries (int): Maximum number of retry attempts (default: 3).
+
+    Returns:
+        list[dict]: A list containing a single part info dict with PartNumber and ETag.
+    """
+    assert len(urls) == 1, "Single part upload should only have one URL"
+    url = urls[0]
+
+    # Configure timeout for S3 uploads
+    timeout = aiohttp.ClientTimeout(total=300, connect=30)  # 5 minute total, 30s connect
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        # Retry logic for the upload
+        for attempt in range(max_retries + 1):  # +1 to include initial attempt
+            try:
+                start_time = asyncio.get_event_loop().time()
+                async with session.put(url, data=data) as response:
+                    upload_time = asyncio.get_event_loop().time() - start_time
+
+                    if not response.ok:
+                        # Get detailed error information from S3
+                        error_body = await response.text()
+                        error_headers = dict(response.headers)
+
+                        logger.error(f"HTTP Status: {response.status} {response.reason}")
+                        logger.error(f"Response Headers: {error_headers}")
+                        logger.error(f"Response Body: {error_body}")
+                        logger.error(f"Request URL: {url}")
+                        logger.error(f"Upload ID: {upload_id}")
+
+                    response.raise_for_status()
+
+                    # Log upload performance
+                    upload_speed_mbps = (len(data) / (1024 * 1024)) / max(upload_time, 0.001)
+                    logger.debug(
+                        f"🏎️ Single part upload completed in {upload_time:.2f}s ({upload_speed_mbps:.2f} MB/s) 🏎️"
+                    )
+
+            except (
+                aiohttp.ClientError,
+                aiohttp.ServerTimeoutError,
+                aiohttp.ClientResponseError,
+                asyncio.TimeoutError,
+                TimeoutError,  # Python built-in TimeoutError
+                ConnectionError,
+                Exception,  # Catch RequestTimeout and other S3-specific errors
+            ) as e:
+                if attempt < max_retries:
+                    # Calculate exponential backoff delay (1s, 2s, 4s, ...)
+                    delay = 2**attempt
+                    logger.warning(
+                        f"Upload failed (attempt {attempt + 1}/{max_retries + 1}): {e}. " f"Retrying in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"Upload failed after {max_retries + 1} attempts: {e}")
+                    raise
 
 
 async def download_file(presigned_url: str, max_retries: int = 3):

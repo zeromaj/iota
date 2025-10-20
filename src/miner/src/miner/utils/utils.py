@@ -9,6 +9,7 @@ from common.utils.cache import async_lru
 from common.utils.exceptions import LayerStateException, NanInfException
 from common.utils.formulas import calculate_num_parts
 from common.utils.shared_states import LayerPhase
+from common.utils.timer_logger import TimerLogger
 from subnet.utils.vector_utils import check_for_nans_and_infs
 import torch
 from bittensor_wallet import Keypair
@@ -118,7 +119,7 @@ async def upload_file(
     hotkey: Keypair,
     data: bytes,
     file_type: Literal["weights", "optimizer_state", "weights_metadata", "optimizer_state_metadata"],
-    file_upload_response: Optional[FileUploadResponse] = None,
+    file_upload_response: Optional[FileUploadResponse | FileUploadResponse] = None,
 ) -> str | dict:
     """
     Uploads a file to the orchestrator. To upload, we need to:
@@ -152,7 +153,9 @@ async def upload_file(
             # Get presigned urls from orchestrator
             file_upload_response: FileUploadResponse | dict = await miner_api_client.initiate_file_upload_request(
                 hotkey=hotkey,
-                file_upload_request=FileUploadRequest(file_type=file_type, num_parts=num_parts),
+                file_upload_request=FileUploadRequest(
+                    file_type=file_type, num_parts=num_parts, multipart=num_parts > 1
+                ),
             )
 
             # Need to return to check the parsing of the response
@@ -163,26 +166,28 @@ async def upload_file(
             data = gzip.compress(data)
 
         # Upload data to presigned urls
-        parts: list[dict] = await MinerAPIClient.upload_multipart_to_s3(
+        logger.debug(f"Uploading file {file_type} to presigned urls: {file_upload_response.urls}")
+        parts: list[dict] = await MinerAPIClient.upload_to_s3(
             urls=file_upload_response.urls, data=data, upload_id=file_upload_response.upload_id
         )
 
         # Complete file upload. Necessary to notify orchestrator that all parts have been uploaded.
-        complete_file_upload_response: (
-            CompleteFileUploadResponse | dict
-        ) = await miner_api_client.complete_file_upload_request(
-            hotkey=hotkey,
-            file_upload_completion_request=FileUploadCompletionRequest(
-                object_name=file_upload_response.object_name,
-                upload_id=file_upload_response.upload_id,
-                parts=parts,
-            ),
-        )
+        if isinstance(file_upload_response, FileUploadResponse) and file_upload_response.upload_id is not None:
+            complete_file_upload_response: CompleteFileUploadResponse | dict = (
+                await miner_api_client.complete_file_upload_request(
+                    hotkey=hotkey,
+                    file_upload_completion_request=FileUploadCompletionRequest(
+                        object_name=file_upload_response.object_name,
+                        upload_id=file_upload_response.upload_id,
+                        parts=parts,
+                    ),
+                )
+            )
 
-        if isinstance(complete_file_upload_response, dict):
-            return complete_file_upload_response
+            if isinstance(complete_file_upload_response, dict):
+                return complete_file_upload_response
 
-        return complete_file_upload_response.object_path
+        return file_upload_response.object_name
 
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
@@ -194,27 +199,31 @@ async def upload_tensor(
     tensor: torch.Tensor,
     hotkey: Keypair,
     file_type: Literal["activation", "weights", "optimizer_state", "local_optimizer_state"] = "activation",
+    upload_urls: list[str] | None = None,
+    object_name: str | None = None,
 ) -> CompleteFileUploadResponse:
-    initiate_response: FileUploadResponse | dict = await miner_api_client.initiate_file_upload_request(
-        hotkey=hotkey,
-        file_upload_request=FileUploadRequest(
-            file_type=file_type,
-            num_parts=1,
-        ),
-    )
-    assert len(tensor) > 0, "Tensor is empty"
+    # TODO: Make this function properly handle single and multipart uploads
+    assert (object_name is None and upload_urls is None) or (
+        object_name is not None and upload_urls is not None
+    ), "Object name and upload urls have to be provided together if provided at all"
+    num_parts = calculate_num_parts(data=tensor.view(torch.uint8).numpy().tobytes())
+    logger.info(f"Uploading {file_type} tensor with {num_parts} parts")
+    upload_id = None
+    initiate_response = None
+    multipart = num_parts > 1
+    existing_upload_urls = upload_urls is not None
 
-    if not initiate_response:
-        raise Exception("Error initiating file upload")
+    # Sanity checks (should not be triggered)
+    if multipart:
+        assert upload_urls is None, "Passing upload_urls which are only valid for single part uploads"
 
+    # Reinterpret tensor memory as bytes in a consistent format (bfloat16 → uint8 bytes)
+    # Always upload as bfloat16-backed bytes to match the downloader's default expectation.
     check_for_nans_and_infs(
         tensor=tensor,
         name=f"Uploading tensor of file type {file_type}",
         exception_type=NanInfException,
     )
-
-    # Reinterpret tensor memory as bytes in a consistent format (bfloat16 → uint8 bytes)
-    # Always upload as bfloat16-backed bytes to match the downloader's default expectation.
     tensor_cpu = tensor.detach().to("cpu").to(torch.bfloat16).contiguous()
     data = tensor_cpu.view(torch.uint8).numpy().tobytes()
 
@@ -222,20 +231,47 @@ async def upload_tensor(
         data = gzip.compress(data)
 
     try:
-        parts: list[dict] = await MinerAPIClient.upload_multipart_to_s3(
-            urls=initiate_response.urls, data=data, upload_id=initiate_response.upload_id
-        )
+        # If we don't already have an upload url, we need to initiate a file upload request
+        if existing_upload_urls:
+            logger.debug(f"Using already provided upload URL for {file_type} tensor")
+        else:
+            async with TimerLogger(name="initiate_activation_upload", metadata={"file_type": file_type}):
+                initiate_response: FileUploadResponse | dict = await miner_api_client.initiate_file_upload_request(
+                    hotkey=hotkey,
+                    file_upload_request=FileUploadRequest(
+                        file_type=file_type,
+                        num_parts=num_parts,
+                    ),
+                )
+                assert len(tensor) > 0, "Tensor is empty"
+                upload_urls = initiate_response.urls
+                upload_id = initiate_response.upload_id
+            if not initiate_response:
+                raise Exception("Error initiating file upload")
 
-        response: CompleteFileUploadResponse | dict = await miner_api_client.complete_file_upload_request(
-            hotkey=hotkey,
-            file_upload_completion_request=FileUploadCompletionRequest(
-                object_name=initiate_response.object_name,
-                upload_id=initiate_response.upload_id,
-                parts=parts,
-            ),
-        )
-        return response
+        # Upload data to presigned urls
+        async with TimerLogger(name="upload_multipart_to_s3", metadata={"file_type": file_type}):
+            logger.debug(f"Uploading tensor {file_type} to presigned urls: {upload_urls}")
+            parts: list[dict] | None = await MinerAPIClient.upload_to_s3(
+                urls=upload_urls, data=data, upload_id=upload_id
+            )
 
+        # for multipart uploads, we need to manually complete the upload request
+        if multipart:
+            async with TimerLogger(name="complete_file_upload_request", metadata={"file_type": file_type}):
+                await miner_api_client.complete_file_upload_request(
+                    hotkey=hotkey,
+                    file_upload_completion_request=FileUploadCompletionRequest(
+                        object_name=initiate_response.object_name,
+                        upload_id=initiate_response.upload_id,
+                        parts=parts,
+                    ),
+                )
+        else:
+            logger.debug(f"Skipped completing file upload request for {file_type} tensor as it is a single part upload")
+        return CompleteFileUploadResponse(
+            object_path=initiate_response.object_name if initiate_response else object_name
+        )
     except Exception as e:
         logger.exception(f"Error uploading multipart to S3: {e}")
         raise

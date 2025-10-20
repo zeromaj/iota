@@ -27,8 +27,10 @@ class CommonAPIClient:
         )
 
         headers = None
+        response = None
         request_id = None  # Will be extracted from response
         body_bytes = create_message_body(data={} if not body else body)
+        response_text = None
 
         if hotkey:
             headers = generate_header(hotkey, body_bytes)
@@ -70,14 +72,15 @@ class CommonAPIClient:
                                 f"Successfully completed request to {path}; response: {str(response_json)[:100]}"
                             )
                             return response_json
-
-            except Exception:
-                raise
+            except RateLimitException:
+                logger.error("Rate limit exception, applying exponential backoff")
+                await asyncio.sleep(2**i)
+            except Exception as e:
+                logger.error(e)
+                await asyncio.sleep(1)
 
         # The only time you get here is because you've exhausted all retries.
-        error_msg = (
-            f"Failed request after {common_settings.REQUEST_RETRY_COUNT} attempts: {response.status}, {response_text}"
-        )
+        error_msg = f"Failed request after {common_settings.REQUEST_RETRY_COUNT} attempts: {response.status if response else 'No response'}, {response_text if response_text else 'No response text'}"
         if request_id:
             with logger.contextualize(request_id=request_id):
                 logger.error(error_msg)

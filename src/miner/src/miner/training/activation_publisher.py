@@ -1,6 +1,6 @@
 import asyncio
 from loguru import logger
-from miner.utils.timer_logger import TimerLogger
+from common.utils.timer_logger import TimerLogger
 import torch
 
 from common.models.api_models import (
@@ -28,6 +28,8 @@ class ActivationPublisher:
         activation_id: str,
         direction: str,
         attestation_challenge_blob: str | None,
+        upload_url: list[str] | None,
+        activation_path: str | None,
     ):
         """Publish an activation to the orchestrator."""
         task = asyncio.create_task(
@@ -36,6 +38,8 @@ class ActivationPublisher:
                 activation_id=activation_id,
                 direction=direction,
                 attestation_challenge_blob=attestation_challenge_blob,
+                upload_url=upload_url,
+                activation_path=activation_path,
             )
         )
         self._publishing_tasks.append(task)
@@ -51,6 +55,8 @@ class ActivationPublisher:
         activation_id: str,
         direction: str,
         attestation_challenge_blob: str | None,
+        upload_url: list[str] | None,
+        activation_path: str | None,
     ):
         """Upload an activation to the orchestrator."""
         try:
@@ -65,6 +71,8 @@ class ActivationPublisher:
                     miner_api_client=self._miner_api_client,
                     tensor=tensor,
                     hotkey=self._miner_api_client.hotkey,
+                    upload_urls=upload_url,
+                    object_name=activation_path,
                 )
                 logger.debug(f"tensor shape before upload:{tensor.shape}")
 

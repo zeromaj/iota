@@ -1,5 +1,5 @@
 from common.models.run_flags import RUN_FLAGS
-from miner.utils.timer_logger import TimerLogger
+from common.utils.timer_logger import TimerLogger
 import torch
 from loguru import logger
 import asyncio
@@ -45,10 +45,11 @@ class TrainingPhase:
         try:
             await self._queue.start_activation_fetcher(model_manager=self._model_manager)
 
+            last_activation_time = time.time()
             while True:
+                await asyncio.sleep(0.01)  # yield control back to the event loop
                 # Check if training phase is complete
                 await self._queue.check_if_training_is_complete()
-                logger.debug("Checking if training is complete")
 
                 if self._cache.is_full() and self._queue.next_activation_is_forward():
                     logger.info(f"Activation cache is full. Waiting for backwards activations: {len(self._cache)}")
@@ -57,13 +58,18 @@ class TrainingPhase:
 
                 # Get next activation to process
                 activation = await self._queue.get_activation()
+                if activation is None:
+                    continue
 
-                with logger.contextualize(activation_id=activation.activation_id):
+                with logger.contextualize(
+                    activation_id=activation.activation_id,
+                    time_since_last_activation=time.time() - last_activation_time,
+                ):
+                    last_activation_time = time.time()
                     if activation.direction == "forward":
                         await self.forward(activation)
                     elif activation.direction == "backward":
                         await self.backward(activation)
-                await asyncio.sleep(0.01)  # yield control back to the event loop
                 # Loop until LayerStateException is raised by `get_activation`
         except Exception:
             logger.info("Finishing training phase")
@@ -152,6 +158,8 @@ class TrainingPhase:
                     activation_id=activation_data.activation_id,
                     direction="forward",
                     attestation_challenge_blob=activation_data.attestation_challenge_blob,
+                    upload_url=activation_data.upload_url,
+                    activation_path=activation_data.activation_upload_path,
                 )
 
                 log_gpu_memory_usage(note="after training forward pass cleaning on non-last layer miner")
@@ -170,42 +178,45 @@ class TrainingPhase:
                 logger.info(
                     f"🔄 Starting BACKWARD pass for activation {activation_data.activation_id} | Layer: {self._state_manager.layer} | Miner: {self._hotkey[:8]}"
                 )
-                log_gpu_memory_usage(note="starting training backward pass")
+                async with TimerLogger(name="moving to gpu"):
+                    log_gpu_memory_usage(note="starting training backward pass")
 
-                # Check if activation is in cache
-                if activation_data.activation_id not in self._cache:
-                    logger.warning(
-                        f"⚠️ Activation {activation_data.activation_id} not found in cache, skipping backward pass"
+                    # Check if activation is in cache
+                    if activation_data.activation_id not in self._cache:
+                        logger.warning(
+                            f"⚠️ Activation {activation_data.activation_id} not found in cache, skipping backward pass"
+                        )
+                        return
+                    cached_activations = self._cache[activation_data.activation_id]
+
+                    # Move to GPU and enable gradients only for floating point tensors
+                    self._model_manager.model = self._model_manager.model.to(miner_settings.DEVICE)
+                    input_activations_gpu = cached_activations.input_activations.to(miner_settings.DEVICE)
+                    activation_grads_gpu = activation_data.input_activations.to(miner_settings.DEVICE)
+                    if loss is None:
+                        # Recalculate the output activations - these will be on GPU
+                        output_activations_gpu, _ = await self._model_manager._forward(
+                            layer=self._state_manager.layer, input_activations=input_activations_gpu
+                        )
+                    else:
+                        # Use the loss from the last layer and copy it to GPU if it's not there already
+                        output_activations_gpu = loss.to(miner_settings.DEVICE)
+
+                    log_gpu_memory_usage(note="after preparing activations on training backward pass")
+
+                    logger.info(
+                        f"output activations before backward with shape {output_activations_gpu.shape} for {self._hotkey[:8]} on layer {self._state_manager.layer}"
                     )
-                    return
-                cached_activations = self._cache[activation_data.activation_id]
-
-                # Move to GPU and enable gradients only for floating point tensors
-                self._model_manager.model = self._model_manager.model.to(miner_settings.DEVICE)
-                input_activations_gpu = cached_activations.input_activations.to(miner_settings.DEVICE)
-                activation_grads_gpu = activation_data.input_activations.to(miner_settings.DEVICE)
-                if loss is None:
-                    # Recalculate the output activations - these will be on GPU
-                    output_activations_gpu, _ = await self._model_manager._forward(
-                        layer=self._state_manager.layer, input_activations=input_activations_gpu
+                async with TimerLogger(name="backward pass"):
+                    await self._model_manager._backward(
+                        layer=self._state_manager.layer,
+                        output_activations=output_activations_gpu,
+                        activation_grads=activation_grads_gpu,
+                        state=cached_activations.state,
                     )
-                else:
-                    # Use the loss from the last layer and copy it to GPU if it's not there already
-                    output_activations_gpu = loss.to(miner_settings.DEVICE)
-
-                log_gpu_memory_usage(note="after preparing activations on training backward pass")
-
-                logger.info(
-                    f"output activations before backward with shape {output_activations_gpu.shape} for {self._hotkey[:8]} on layer {self._state_manager.layer}"
-                )
-                await self._model_manager._backward(
-                    layer=self._state_manager.layer,
-                    output_activations=output_activations_gpu,
-                    activation_grads=activation_grads_gpu,
-                    state=cached_activations.state,
-                )
                 log_gpu_memory_usage(note="after backward pass")
 
+            async with TimerLogger(name="publishing_backwards"):
                 self.backwards_since_reset += 1
                 logger.debug(f"Backwards since reset for miner {self._hotkey[:8]}: {self.backwards_since_reset}")
 
@@ -238,38 +249,41 @@ class TrainingPhase:
                     activation_id=activation_data.activation_id,
                     direction="backward",
                     attestation_challenge_blob=activation_data.attestation_challenge_blob,
+                    upload_url=activation_data.upload_url,
+                    activation_path=activation_data.activation_upload_path,
                 )
 
-            # Cleanup cache
-            del self._cache[activation_data.activation_id]
-            del cached_activations
+            async with TimerLogger(name="cleaning up cache"):
+                # Cleanup cache
+                del self._cache[activation_data.activation_id]
+                del cached_activations
 
-            # Cleanup GPU memory
-            del output_activations_gpu, input_activations_gpu, activation_grads_gpu, loss
+                # Cleanup GPU memory
+                del output_activations_gpu, input_activations_gpu, activation_grads_gpu, loss
 
-            with logger.contextualize(cache_size=len(self._cache)):
-                log_gpu_memory_usage(note="after training backward pass cleaning")
+                with logger.contextualize(cache_size=len(self._cache)):
+                    log_gpu_memory_usage(note="after training backward pass cleaning")
 
-                # Check if we need to perform a local optimization step
-                self.backwards_since_last_optim += 1
-                if self.backwards_since_last_optim >= common_settings.MINI_BATCH_ACCUMULATION_COUNT:
-                    logger.info(
-                        f"🔄 Miner {self._hotkey[:8]} performing local optimization step after {common_settings.MINI_BATCH_ACCUMULATION_COUNT} backward passes"
-                    )
-                    learning_rate = await self._miner_api_client.get_learning_rate()
-                    await self._model_manager.local_optimization_step(learning_rate=learning_rate)
-                    await self.optimization_reset()
+                    # Check if we need to perform a local optimization step
+                    self.backwards_since_last_optim += 1
+                    if self.backwards_since_last_optim >= common_settings.MINI_BATCH_ACCUMULATION_COUNT:
+                        logger.info(
+                            f"🔄 Miner {self._hotkey[:8]} performing local optimization step after {common_settings.MINI_BATCH_ACCUMULATION_COUNT} backward passes"
+                        )
+                        learning_rate = await self._miner_api_client.get_learning_rate()
+                        await self._model_manager.local_optimization_step(learning_rate=learning_rate)
+                        await self.optimization_reset()
 
-                    log_gpu_memory_usage(note="after local optimization step")
+                        log_gpu_memory_usage(note="after local optimization step")
 
-                    self.local_optimization_steps += 1
+                        self.local_optimization_steps += 1
+                        logger.success(
+                            f"✅ Miner {self._hotkey[:8]} completed local optimization step #{self.local_optimization_steps}"
+                        )
+
                     logger.success(
-                        f"✅ Miner {self._hotkey[:8]} completed local optimization step #{self.local_optimization_steps}"
+                        f"✅ Successfully completed BACKWARD pass for activation {activation_data.activation_id} | Layer: {self._state_manager.layer} | Miner: {self._hotkey[:8]}"
                     )
-
-                logger.success(
-                    f"✅ Successfully completed BACKWARD pass for activation {activation_data.activation_id} | Layer: {self._state_manager.layer} | Miner: {self._hotkey[:8]}"
-                )
 
     async def compute_last_layer_loss(self, activation_data: ActivationData, logits: torch.Tensor) -> torch.Tensor:
         """
