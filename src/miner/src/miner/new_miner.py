@@ -3,7 +3,7 @@ import copy
 from loguru import logger
 import json
 import sys
-from miner.utils.timer_logger import TimerLogger
+from common.utils.timer_logger import TimerLogger
 from miner.utils.partition_merging import download_previous_optimizer_state_for_partition_batch, merge_partition_batch
 from miner.utils.partition_merging import get_partition_batch
 from miner.utils.partition_merging import download_pseudograds_for_partition_batch

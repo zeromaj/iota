@@ -14,8 +14,8 @@ class WeightsUploadResponse(BaseModel):
 
 class FileUploadCompletionRequest(BaseModel):
     object_name: str
-    upload_id: str
-    parts: list[dict]
+    upload_id: str | None = None
+    parts: list[dict] | None = None
 
 
 class CompleteFileUploadResponse(BaseModel):
@@ -25,12 +25,13 @@ class CompleteFileUploadResponse(BaseModel):
 class FileUploadResponse(BaseModel):
     object_name: str
     urls: list[str]
-    upload_id: str
+    upload_id: str | None = None
 
 
 class FileUploadRequest(BaseModel):
     num_parts: int
     file_type: Literal["weights", "optimizer_state", "activation", "weights_metadata", "local_optimizer_state"]
+    multipart: bool = True
 
     @model_validator(mode="after")
     def validate_num_parts(self):
@@ -82,11 +83,13 @@ class LossReportRequest(BaseModel):
 class ActivationResponse(BaseModel):
     activation_id: str | None = None
     direction: Literal["forward", "backward"] | None = None
-    presigned_upload_url: str | None = None
     upload_id: str | None = None
     presigned_download_url: str | None = None
     reason: str | None = None
     attestation_challenge_blob: str | None = None
+    presigned_upload_url: list[str] | None = None
+    activation_upload_path: str | None = None
+    target_download_url: str | None = None
 
 
 class SubmittedWeightsAndOptimizerPresigned(BaseModel):
@@ -212,8 +215,8 @@ class SubmitActivationRequest(BaseModel):
 
 class RegisterMinerRequest(BaseModel):
     run_id: str
-    coldkey: str | None = None  # (optional for miner pool miners)
     attestation: MinerAttestationPayload | None = None
+    coldkey: str | None = None
 
 
 class RunInfo(BaseModel):

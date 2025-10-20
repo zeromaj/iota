@@ -21,6 +21,9 @@ class ActivationData(BaseModel):
     upload_time: float
     attestation_challenge_blob: str | None = None
 
+    upload_url: list[str] | None = None
+    activation_upload_path: str | None = None
+
     class Config:
         arbitrary_types_allowed = True
 

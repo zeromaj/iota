@@ -6,17 +6,16 @@ from common.models.api_models import (
     CompleteFileUploadResponse,
     FileUploadCompletionRequest,
     FileUploadRequest,
-    FileUploadResponse,
-    GetTargetsRequest,
     LossReportRequest,
     MinerRegistrationResponse,
     RegisterMinerRequest,
+    FileUploadResponse,
     SubmitActivationRequest,
     SubmittedWeightsAndOptimizerPresigned,
     SyncActivationAssignmentsRequest,
     WeightUpdate,
 )
-from common.models.error_models import BaseErrorModel, LayerStateError, EntityNotRegisteredError, SpecVersionError
+from common.models.error_models import LayerStateError, EntityNotRegisteredError, SpecVersionError
 from common.utils.exceptions import LayerStateException, MinerNotRegisteredException, SpecVersionException
 from common.utils.partitions import MinerPartition
 from common.utils.s3_utils import upload_parts
@@ -30,12 +29,6 @@ class MinerAPIClient(CommonAPIClient):
     def __init__(self, hotkey: Keypair | None = None):
         self.hotkey = hotkey
         self.layer_state = LayerPhase.TRAINING
-
-    async def get_targets(self, get_targets_request: GetTargetsRequest) -> str | BaseErrorModel:
-        response = await CommonAPIClient.orchestrator_request(
-            method="POST", path="/miner/get_targets", hotkey=self.hotkey, body=get_targets_request.model_dump()
-        )
-        return self.parse_response(response)
 
     async def fetch_run_info_request(self) -> list[RunInfo]:
         response = await CommonAPIClient.orchestrator_request(
@@ -211,7 +204,7 @@ class MinerAPIClient(CommonAPIClient):
         self,
         hotkey: Keypair,
         file_upload_request: FileUploadRequest,
-    ) -> FileUploadResponse | dict:
+    ) -> FileUploadResponse | FileUploadResponse | dict:
         try:
             response = await CommonAPIClient.orchestrator_request(
                 method="POST",
@@ -220,17 +213,21 @@ class MinerAPIClient(CommonAPIClient):
                 body=file_upload_request.model_dump(),
             )
             parsed_response = self.parse_response(response)
-            return FileUploadResponse.model_validate(parsed_response)
+            return (
+                FileUploadResponse.model_validate(parsed_response)
+                if file_upload_request.multipart
+                else FileUploadResponse.model_validate(parsed_response)
+            )
         except Exception as e:
             logger.error(f"Error initiating file upload: {e}")
             raise
 
     @classmethod
-    async def upload_multipart_to_s3(cls, urls: list[str], data: bytes, upload_id: str) -> list[dict]:
+    async def upload_to_s3(cls, urls: list[str], data: bytes, upload_id: str) -> list[dict] | None:
         assert len(urls) > 0, "No URLs provided"
         assert len(data) > 0, "No data provided"
-        parts = await upload_parts(urls=urls, data=data, upload_id=upload_id)
-        return parts
+        response = await upload_parts(urls=urls, data=data, upload_id=upload_id)
+        return response
 
     async def complete_file_upload_request(
         self,

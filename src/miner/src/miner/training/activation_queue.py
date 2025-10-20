@@ -1,12 +1,12 @@
 import asyncio
 from collections import deque
 from loguru import logger
-from miner.utils.timer_logger import TimerLogger
+from common.utils.timer_logger import TimerLogger
 import torch
 import time
 from pydantic import BaseModel
 
-from common.models.api_models import ActivationResponse, GetTargetsRequest, GetActivationRequest
+from common.models.api_models import ActivationResponse, GetActivationRequest
 from common import settings as common_settings
 from common.utils.exceptions import RateLimitException
 from subnet.miner_api_client import MinerAPIClient
@@ -70,31 +70,30 @@ class ActivationQueue:
             await self.stop_activation_fetcher()  # This should raise LayerStateException
             raise Exception("Unexpected error: Activation fetcher is done, it should have raised LayerStateException")
 
-        logger.debug("Activation fetcher is not done, training will continue")  # produces too many logs
+        # logger.debug("Activation fetcher is not done, training will continue")  # produces too many logs
         return False
 
     async def get_activation(self, timeout=-1) -> ActivationData:
         """Get an activation from the queue. If the queue is empty, wait for a new activation to be added."""
         start_time = time.time()
-        while True:
-            try:
-                # Check if the activation fetcher task has completed with an exception
-                await self.check_if_training_is_complete()  # This will raise any exception from the background task
+        try:
+            # Check if the activation fetcher task has completed with an exception
+            await self.check_if_training_is_complete()  # This will raise any exception from the background task
 
-                async with self._queue_lock:
-                    if len(self._backward_queue) + len(self._forward_queue) > 0:
-                        logger.debug(
-                            f"Activation queue length: {len(self._backward_queue) + len(self._forward_queue)}: "
-                            f"backward: {[a.activation_id for a in self._backward_queue]} "
-                            f"forward: {[a.activation_id for a in self._forward_queue]}"
-                        )
-                        logger.debug(f"Cache status: {len(self._cache)}")
-                        if len(self._backward_queue) > 0:
-                            logger.debug(f"Took {time.time() - start_time} seconds to get backward activation")
-                            return self._backward_queue.popleft()
-                        if len(self._forward_queue) > 0 and not self._cache.is_full():
-                            logger.debug(f"Took {time.time() - start_time} seconds to get forward activation")
-                            return self._forward_queue.popleft()
+            async with self._queue_lock:
+                if len(self._backward_queue) + len(self._forward_queue) > 0:
+                    logger.debug(
+                        f"Activation queue length: {len(self._backward_queue) + len(self._forward_queue)}: "
+                        f"backward: {[a.activation_id for a in self._backward_queue]} "
+                        f"forward: {[a.activation_id for a in self._forward_queue]}"
+                    )
+                    logger.debug(f"Cache status: {len(self._cache)}")
+                    if len(self._backward_queue) > 0:
+                        logger.debug(f"Took {time.time() - start_time} seconds to get backward activation")
+                        return self._backward_queue.popleft()
+                    if len(self._forward_queue) > 0 and not self._cache.is_full():
+                        logger.debug(f"Took {time.time() - start_time} seconds to get forward activation")
+                        return self._forward_queue.popleft()
 
                 # Wait for more activations
                 if timeout > 0 and time.time() - start_time > timeout:
@@ -111,10 +110,9 @@ class ActivationQueue:
                     },
                 ):
                     await asyncio.sleep(0.1)  # prevent CPU from being blocked
-                continue
-            except Exception as e:
-                logger.error(f"Error getting activation from queue: {e}")
-                raise
+        except Exception as e:
+            logger.error(f"Error getting activation from queue: {e}")
+            raise
 
     def activation_fetcher_is_done(self) -> bool:
         """Check if the activation fetcher task has completed."""
@@ -151,7 +149,7 @@ class ActivationQueue:
         """Fetch activations from the miner API and add them to the queue."""
         while True:
             # This loop will only break if `get_activation` raises an exception (i.e. LayerStateException)
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.51)  # comply with the orchestrator rate limit
 
             async with TimerLogger(
                 name="fetch_activations",
@@ -275,6 +273,8 @@ class ActivationQueue:
                         state=None,
                         upload_time=time.time(),
                         attestation_challenge_blob=activation_response.attestation_challenge_blob,
+                        upload_url=activation_response.presigned_upload_url,
+                        activation_upload_path=activation_response.activation_upload_path,
                     )
                     logger.debug(
                         f"Downloaded activation {activation_response.activation_id} going {activation_response.direction}"
@@ -333,12 +333,9 @@ class ActivationQueue:
                         and self._state_manager.layer == self._model_manager.model_metadata["n_splits"] - 1
                     ):
                         logger.debug("Last layer miner, downloading sample activations")
-                        initial_activations_path = await self._miner_api_client.get_targets(
-                            get_targets_request=GetTargetsRequest(activation_id=activation_response.activation_id),
-                        )
                         sample_activations = await asyncio.wait_for(
                             download_sample(
-                                download_url=initial_activations_path,
+                                download_url=activation_response.target_download_url,
                                 tokenizer=self._model_manager.tokenizer,
                                 device="cpu",
                             ),
