@@ -131,7 +131,7 @@ async def download_merged_partitions(
                     return_exceptions=True,
                 )
 
-                downloaded_tensors = filter_exceptions(downloaded_tensors)
+                downloaded_tensors, batch_partitions = filter_exceptions(downloaded_tensors, batch_partitions)
 
                 logger.info(
                     f"Percentage of downloaded tensors filtered: {len(downloaded_tensors) / len(batch_partitions) * 100}%"
