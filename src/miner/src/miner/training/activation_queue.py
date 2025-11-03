@@ -303,7 +303,7 @@ class ActivationQueue:
                                 tokenizer=self._model_manager.tokenizer,
                                 device="cpu",
                             ),
-                            timeout=60,  # TODO: @cassova: this value should change based on activation size
+                            timeout=common_settings.S3_DOWNLOAD_TIMEOUT,
                         )
                     else:
                         input_activations = await asyncio.wait_for(
@@ -311,7 +311,7 @@ class ActivationQueue:
                                 path=activation_response.presigned_download_url,
                                 device="cpu",
                             ),
-                            timeout=60,  # TODO: @cassova: this value should change based on activation size
+                            timeout=common_settings.S3_DOWNLOAD_TIMEOUT,
                         )
                         if not common_settings.MOCK:
                             input_activations = input_activations.reshape(
@@ -339,7 +339,7 @@ class ActivationQueue:
                                 tokenizer=self._model_manager.tokenizer,
                                 device="cpu",
                             ),
-                            timeout=60,  # TODO: @cassova: this value should change based on activation size
+                            timeout=common_settings.S3_DOWNLOAD_TIMEOUT,
                         )
                     return DownloadedData(
                         activation_response=activation_response,

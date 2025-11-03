@@ -313,9 +313,19 @@ class Miner(BaseNeuron, HealthServerMixin):
             if previous_weights is None:
                 raise Exception(f"Previous weights are None for miner {self.hotkey[:8]}")
             # creating changes
-            pseudo_gradients = previous_weights.to(torch.float32) - current_weights.to(torch.float32)
+            pseudo_gradients = torch.zeros_like(previous_weights).to(torch.bfloat16)
+            batches = 100
+            # iterate over pseudo gradients in batches and fill them - this avoids using unnecessary memory usage
+            for i in range(batches):
+                logger.debug(f"Getting pseudo gradients for batch {i}")
+                previous_weights_batch = previous_weights[i::batches]
+                current_weights_batch = current_weights[i::batches]
+                pseudo_gradients_batch = previous_weights_batch.to(torch.float32) - current_weights_batch.to(
+                    torch.float32
+                )
+                pseudo_gradients[i::batches] = pseudo_gradients_batch.to(torch.bfloat16)
+
             pseudo_gradients = await self.model_manager.clip_pseudo_gradients(pseudo_gradients)
-            pseudo_gradients = pseudo_gradients.to(torch.bfloat16)
 
             # Log some stats about the pseudo gradients
             logger.info(

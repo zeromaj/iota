@@ -13,6 +13,77 @@ def add_artificial_gradients(model: torch.nn.Module, device: Union[str, torch.de
             param.grad = torch.zeros_like(param.data).to(dtype=torch.bfloat16).to(device)
 
 
+def get_optimizer_tensor_shapes(optimizer: torch.optim.Optimizer):
+    state_dict = optimizer.state_dict()
+    tensor_shapes = []
+
+    for group in state_dict["state"].values():
+        for k, v in group.items():
+            if k == "step":
+                continue
+            if isinstance(v, torch.Tensor):
+                tensor_shapes.append(v.shape)
+    return tensor_shapes
+
+
+def extract_optimizer_state_section(optimizer: torch.optim.Optimizer, start_idx: int, end_idx: int) -> torch.Tensor:
+    """Return a flattened slice of the optimizer state between start_idx (inclusive) and end_idx (exclusive)."""
+
+    if start_idx < 0 or end_idx < start_idx:
+        raise ValueError("Invalid optimizer state indices")
+
+    state_dict = optimizer.state_dict()
+    state = state_dict.get("state", {})
+
+    total_elements = sum(
+        v.numel() for group in state.values() for k, v in group.items() if k != "step" and isinstance(v, torch.Tensor)
+    )
+
+    if end_idx > total_elements:
+        raise ValueError("End index exceeds optimizer state size")
+
+    if start_idx == end_idx:
+        return torch.empty((0,), dtype=torch.bfloat16, device="cpu")
+
+    current_offset = 0
+    section_tensors: list[torch.Tensor] = []
+
+    for group in state.values():
+        for key, value in group.items():
+            if key == "step" or not isinstance(value, torch.Tensor):
+                continue
+
+            flattened = value.flatten()
+            next_offset = current_offset + flattened.numel()
+
+            if next_offset <= start_idx:
+                current_offset = next_offset
+                continue
+
+            if current_offset >= end_idx:
+                break
+
+            slice_start = max(start_idx - current_offset, 0)
+            slice_end = min(end_idx - current_offset, flattened.numel())
+
+            if slice_start < slice_end:
+                section_tensors.append(flattened[slice_start:slice_end])
+
+            current_offset = next_offset
+
+            if current_offset >= end_idx:
+                break
+
+        if current_offset >= end_idx:
+            break
+
+    if not section_tensors:
+        return torch.empty((0,), dtype=torch.bfloat16, device="cpu")
+
+    flat_section = torch.cat(section_tensors)
+    return flat_section.to(dtype=torch.bfloat16, device="cpu")
+
+
 def flatten_optimizer_state(
     optimizer: torch.optim.Optimizer, device: Union[str, torch.device], dtype=torch.bfloat16
 ) -> tuple[torch.Tensor, list[tuple[int, ...]], dict]:

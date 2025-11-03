@@ -16,7 +16,12 @@ from subnet.miner_api_client import MinerAPIClient
 from subnet.model.utils import log_gpu_memory_usage
 from subnet.utils.partition_utils import MergingPartition, download_partition_optimizer
 from subnet.utils.s3_torch import download_weights_or_optimizer_state
-from subnet.utils.vector_utils import add_artificial_gradients, flatten_optimizer_state, reconstruct_optimizer_state
+from subnet.utils.vector_utils import (
+    add_artificial_gradients,
+    extract_optimizer_state_section,
+    get_optimizer_tensor_shapes,
+    reconstruct_optimizer_state,
+)
 import torch
 
 
@@ -193,9 +198,9 @@ async def get_weight_partition_info(
     Returns:
         tuple[list[SubmittedWeightsPresigned], list[int]]: The weight partition info and the partition ids
     """
-    weight_path_per_layer: (
-        list[SubmittedWeightsAndOptimizerPresigned] | dict
-    ) = await miner_api_client.get_weight_path_per_layer()
+    weight_path_per_layer: list[
+        SubmittedWeightsAndOptimizerPresigned
+    ] | dict = await miner_api_client.get_weight_path_per_layer()
 
     if not weight_path_per_layer:
         raise WeightPartitionException("Unknown error getting weight path per layer")
@@ -307,7 +312,7 @@ async def merge_partition_batch(
     partition_batch: list[MergingPartition],
     filtered_metadata: dict[str, dict[int, dict[str, ChunkMetadata]]],
     old_model: torch.nn.Module,
-    local_optimizer_state: dict,
+    local_optimizer_state: torch.optim.Optimizer,
     num_partitions: int,
     weights_length: int,
     device: str,
@@ -316,6 +321,7 @@ async def merge_partition_batch(
 
     optimizer_shapes = None
     valid_partitions = []
+    local_optimizer_total_states = get_total_optimizer_state_size(local_optimizer_state)
 
     for partition in partition_batch:
         old_model_copy = None
@@ -363,16 +369,14 @@ async def merge_partition_batch(
             outer_optimizer, total_states = create_outer_optimizer(model=old_model_copy, device=device)
 
             if optimizer_shapes is None:
-                _, optimizer_shapes, _ = flatten_optimizer_state(outer_optimizer, device=device)
-
+                optimizer_shapes = get_optimizer_tensor_shapes(outer_optimizer)
             optimizer_start_idx, optimizer_end_idx = await get_start_and_end_indices(
-                tensor_length=flatten_optimizer_state(optimizer=outer_optimizer, device=device)[0].numel(),
+                tensor_length=total_states,
                 num_sections=num_partitions,
                 target_section=partition.new_partition.chunk_number,
             )
-            local_optimizer_state_flat, _, _ = flatten_optimizer_state(optimizer=local_optimizer_state, device=device)
             local_optimizer_start_idx, local_optimizer_end_idx = await get_start_and_end_indices(
-                tensor_length=len(local_optimizer_state_flat),
+                tensor_length=local_optimizer_total_states,
                 num_sections=num_partitions,
                 target_section=partition.new_partition.chunk_number,
             )
@@ -422,13 +426,12 @@ async def merge_partition_batch(
             partition.new_weights = torch.nn.utils.parameters_to_vector(old_model_copy.parameters())[
                 weight_start_idx:weight_end_idx
             ]
-            partition.local_optimizer_state = local_optimizer_state_flat[
-                local_optimizer_start_idx:local_optimizer_end_idx
-            ]
-            flat_optimizer_state, _, _ = flatten_optimizer_state(outer_optimizer, device=device)
-            logger.debug(f"flat_optimizer_state: {flat_optimizer_state.shape}")
-            logger.debug(f"optimizer_start_idx: {optimizer_start_idx}, optimizer_end_idx: {optimizer_end_idx}")
-            partition.new_optimizer_state = flat_optimizer_state[optimizer_start_idx:optimizer_end_idx]
+            partition.local_optimizer_state = extract_optimizer_state_section(
+                local_optimizer_state, local_optimizer_start_idx, local_optimizer_end_idx
+            )
+            partition.new_optimizer_state = extract_optimizer_state_section(
+                outer_optimizer, optimizer_start_idx, optimizer_end_idx
+            )
             log_gpu_memory_usage(
                 note=f"after setting up new optimizer state for partition {partition.new_partition.chunk_number}"
             )

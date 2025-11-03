@@ -19,6 +19,9 @@ class ModelConfig(BaseModel):
     rope_base: float | None = None
     dtype: str | None = None
     rope_freq: dict[str, float] | None = None
+    s3_download_timeout: int | None = None
+    s3_upload_timeout: int | None = None
+    activation_timeout: int | None = None
 
 
 class LearningRateMetadata(BaseModel):

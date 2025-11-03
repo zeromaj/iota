@@ -16,7 +16,7 @@ LOG_FILE_ENABLED = os.getenv("LOG_FILE_ENABLED") == "True"
 TEST_MODE = os.getenv("TEST_MODE") == "True"
 
 # Bittensor settings
-__SPEC_VERSION__ = 20015
+__SPEC_VERSION__ = 20016
 __VALIDATOR_SPEC_VERSION__ = 4065
 BITTENSOR = os.getenv("BITTENSOR") == "True"
 MAX_NUM_PARTS = int(os.getenv("MAX_NUM_PARTS", 10000))
@@ -78,12 +78,15 @@ NESTEROV_LEARNING_RATE = 0.7
 NESTEROV_MOMENTUM = 0.9
 
 # Activation settings - not for miner's to change
-MAX_ACTIVATION_CACHE_SIZE = 24
+MAX_ACTIVATION_CACHE_SIZE = 8
 MAX_FORWARD_ACTIVATIONS_IN_QUEUE = 6
 MIN_FORWARD_ACTIVATIONS_IN_QUEUE = 2
+LOCAL_BATCH_SIZE = 2  # Splits the minibatch further into even smaller local batches to avoid running out of memory
 MINI_BATCH_SIZE = 8
-MINI_BATCH_ACCUMULATION_COUNT = 8
+MINI_BATCH_ACCUMULATION_COUNT = 16
 SEQUENCE_LENGTH = 800
 
 # Epoch level sync settings
 DOWNLOAD_BATCH_SIZE = 50
+S3_DOWNLOAD_TIMEOUT = 300
+S3_UPLOAD_TIMEOUT = 300

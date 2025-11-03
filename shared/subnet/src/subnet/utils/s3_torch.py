@@ -115,7 +115,7 @@ async def download_weights_or_optimizer_state(
 ) -> torch.Tensor:
     """Download weights from S3 storage with retry logic."""
     start_time = time()
-    timeout = aiohttp.ClientTimeout(total=300)  # 5 minute timeout
+    timeout = aiohttp.ClientTimeout(total=3000)  # 5 minute timeout
 
     for attempt in range(max_retries + 1):
         try:

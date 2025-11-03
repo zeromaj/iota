@@ -25,6 +25,9 @@ LLAMA32_CONFIG_100M = {
     # "model_splits": [[-1, 2], [2, 4], [4, -1]],
     "miners_per_layer": [1, 2],
     # "miners_per_layer": [1, 1, 2],
+    "s3_download_timeout": 180,
+    "s3_upload_timeout": 180,
+    "activation_timeout": 60,
 }
 
 LLAMA32_CONFIG_1B = {
@@ -53,6 +56,9 @@ LLAMA32_CONFIG_1B = {
     "model_splits": [[-1, 5], [5, 10], [10, -1]],
     # "model_splits": [[-1, 2], [2, 6], [6, 10], [10, 14], [14, -1]],
     "miners_per_layer": [1, 1, 3],
+    "s3_download_timeout": 300,
+    "s3_upload_timeout": 300,
+    "activation_timeout": 60,
 }
 
 LLAMA32_CONFIG_3B = {
@@ -80,6 +86,10 @@ LLAMA32_CONFIG_3B = {
         "original_context_length": 8192,
     },
     "model_splits": [[-1, 2], [2, 4], [4, -1]],  # TODO: change this to the correct splits
+    "miners_per_layer": [1, 1, 2],
+    "s3_download_timeout": 600,  # TODO change these to the correct values
+    "s3_upload_timeout": 600,
+    "activation_timeout": 120,
 }
 
 LLAMA32_CONFIG_5B = {
@@ -106,6 +116,10 @@ LLAMA32_CONFIG_5B = {
         "original_context_length": 8192,
     },
     "model_splits": [[-1, 2], [2, 4], [4, -1]],  # TODO: change this to the correct splits
+    "miners_per_layer": [1, 1, 2],
+    "s3_download_timeout": 600,  # TODO change these to the correct values
+    "s3_upload_timeout": 600,
+    "activation_timeout": 120,
 }
 
 LLAMA32_CONFIG_7B = {
@@ -132,6 +146,10 @@ LLAMA32_CONFIG_7B = {
         "original_context_length": 8192,
     },
     "model_splits": [[-1, 2], [2, 4], [4, -1]],  # TODO: change this to the correct splits
+    "miners_per_layer": [1, 1, 2],
+    "s3_download_timeout": 600,  # TODO change these to the correct values
+    "s3_upload_timeout": 600,
+    "activation_timeout": 120,
 }
 
 LLAMA32_CONFIG_8B = {
@@ -158,6 +176,10 @@ LLAMA32_CONFIG_8B = {
         "original_context_length": 8192,
     },
     "model_splits": [[-1, 2], [2, 4], [4, -1]],  # TODO: change this to the correct splits
+    "miners_per_layer": [1, 1, 2],
+    "s3_download_timeout": 600,  # TODO change these to the correct values
+    "s3_upload_timeout": 600,
+    "activation_timeout": 120,
 }
 
 LLAMA32_CONFIG_12B = {
@@ -184,6 +206,10 @@ LLAMA32_CONFIG_12B = {
         "original_context_length": 8192,
     },
     "model_splits": [[-1, 11], [11, 27], [27, -1]],
+    "miners_per_layer": [1, 1, 2],
+    "s3_download_timeout": 600,  # TODO change these to the correct values
+    "s3_upload_timeout": 600,
+    "activation_timeout": 120,
 }
 
 LLAMA32_CONFIG_15B = {
@@ -210,6 +236,10 @@ LLAMA32_CONFIG_15B = {
         "original_context_length": 8192,
     },
     "model_splits": [[-1, 8], [8, 19], [19, 30], [30, 41], [41, -1]],
+    "miners_per_layer": [1, 1, 1, 1, 3],
+    "s3_download_timeout": 600,
+    "s3_upload_timeout": 600,
+    "activation_timeout": 120,
 }
 
 LLAMA32_CONFIG_21B = {
@@ -236,4 +266,8 @@ LLAMA32_CONFIG_21B = {
         "original_context_length": 8192,
     },
     "model_splits": [[-1, 11], [11, 27], [27, 43], [43, 59], [59, -1]],
+    "miners_per_layer": [1, 1, 2],
+    "s3_download_timeout": 600,  # TODO change these to the correct values
+    "s3_upload_timeout": 600,
+    "activation_timeout": 120,
 }

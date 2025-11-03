@@ -139,6 +139,35 @@ class ModelManager:
             log_gpu_memory_usage(note="after forward pass")
             return output_activations, state
 
+    """
+    Forward pass through the network:
+    Layer 0: forward (don't keep grads) -> Layer 1 forward (don't keep grads) -> Layer 2 forward (don't keep grads)
+
+    Backward pass:
+
+
+    """
+
+    async def _forward_no_intermittent_activations(
+        self, layer: int, input_activations: torch.Tensor
+    ) -> tuple[torch.Tensor, dict]:
+        input_activations.requires_grad_(False)
+        with logger.contextualize(gpu="forward pass"):
+            local_batch_size = common_settings.LOCAL_BATCH_SIZE
+            output_activations_list = []
+            state_list = []
+
+            for i in range(0, len(input_activations), local_batch_size):
+                input_activations_batch = input_activations[i : i + local_batch_size]
+                output_activations_batch, state = self.model(input_activations_batch)
+                output_activations_list.append(output_activations_batch.detach())
+                del output_activations_batch
+                state_list.append(state)
+            output_activations = torch.cat(output_activations_list, dim=0).detach()
+            state = state_list
+
+            return output_activations, state
+
     async def _backward(
         self,
         layer: int,
@@ -152,18 +181,43 @@ class ModelManager:
             # If this is the last layer, then output_activations is the loss
             if layer == self.model_metadata["n_splits"] - 1:
                 try:
+                    logger.debug(
+                        f"Checking for NaNs and Infs in output activations of shape {output_activations.shape}"
+                    )
                     check_for_nans_and_infs(
                         output_activations,
                         f"output activations for miner {self.logger_attributes['hotkey'][:8]}",
                         exception_type=NanInfException,
                     )
-                    output_activations.backward()
+                    logger.debug(
+                        f"Backwarding last layer output activations of shape {output_activations.shape}: {output_activations}"
+                    )
+                    try:
+                        output_activations.backward()
+                        logger.debug(
+                            f"Backwarded last layer output activations of shape {output_activations.shape}: {output_activations}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Fatal error during backward() call on last layer: {e}")
+                        logger.exception(e)
+                        raise
                 except RuntimeError as e:
                     logger.error(f"Error during backward step: {e}")
                     raise
+                except Exception as e:
+                    logger.exception(e)
             else:
                 try:
+                    logger.debug(
+                        f"Backwarding output activations of shape {output_activations.shape}, activation grads of shape {activation_grads.shape}"
+                    )
+                    logger.debug(
+                        f"Backwarding output activations of shape {output_activations.shape}, activation grads of shape {activation_grads.shape}"
+                    )
                     self.model.backward(output_activations, activation_grads, state)
+                    logger.debug(
+                        f"Backwarded output activations of shape {output_activations.shape}, activation grads of shape {activation_grads.shape}"
+                    )
                 except RuntimeError as e:
                     logger.error(f"Error during backward step: {e}")
                     raise
