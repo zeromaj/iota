@@ -6,6 +6,7 @@ from typing import Any
 import aiohttp
 from loguru import logger
 from common.models.run_flags import RUN_FLAGS
+from common import settings as common_settings
 
 
 async def upload_parts(urls: list[str], data: bytes, upload_id: str | None, max_retries: int = 3) -> list[dict]:
@@ -32,7 +33,7 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str | None, max_
             raise
 
     # Configure timeout for S3 uploads - allow for larger files with reasonable timeout
-    timeout = aiohttp.ClientTimeout(total=300, connect=30)  # 5 minute total, 30s connect
+    timeout = aiohttp.ClientTimeout(total=common_settings.S3_UPLOAD_TIMEOUT, connect=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         parts = []
 
@@ -119,7 +120,7 @@ async def upload_part(urls: list[str], data: bytes, upload_id: str, max_retries:
     url = urls[0]
 
     # Configure timeout for S3 uploads
-    timeout = aiohttp.ClientTimeout(total=300, connect=30)  # 5 minute total, 30s connect
+    timeout = aiohttp.ClientTimeout(total=common_settings.S3_UPLOAD_TIMEOUT, connect=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         # Retry logic for the upload
         for attempt in range(max_retries + 1):  # +1 to include initial attempt
@@ -170,7 +171,7 @@ async def upload_part(urls: list[str], data: bytes, upload_id: str, max_retries:
 
 async def download_file(presigned_url: str, max_retries: int = 3):
     """Download a file from S3 storage with retry logic."""
-    timeout = aiohttp.ClientTimeout(total=300)  # 5 minute timeout
+    timeout = aiohttp.ClientTimeout(total=common_settings.S3_DOWNLOAD_TIMEOUT)
 
     for attempt in range(max_retries + 1):
         try:

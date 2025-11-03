@@ -260,24 +260,29 @@ def save_model_weights_and_optimizer_state(
         logger.exception(f"Error saving model weights and optimizer state: {e}")
 
 
+def get_model_weight_path(hotkey: str, run_id: str, layer_idx: int) -> str:
+    model_suffix = _model_suffix(hotkey=hotkey, run_id=run_id, layer_idx=layer_idx)
+
+    logger.debug(f"All potential model weights files: {os.listdir('./weights')}")
+    weight_path = [f for f in os.listdir("./weights") if f"current_model_weights_{model_suffix}" in f]
+
+    if not weight_path:
+        raise Exception(
+            f"Model weights file not found for hotkey {hotkey[:8]} and run_id {run_id} and layer_idx {layer_idx}"
+        )
+
+    # Load the most recent snapshot (lexicographically by timestamp or by mtime)
+    weight_path = sorted(weight_path, key=lambda f: os.path.getmtime(f"./weights/{f}"))
+    latest_weight_file = weight_path[-1]
+    logger.debug(f"Loading model weights from ./weights/{latest_weight_file}")
+    return latest_weight_file
+
+
 def load_model_weights(hotkey: str, run_id: str, layer_idx: int) -> torch.Tensor:
     """Loads the model weights from the weights directory and returns them on the CPU."""
     try:
-        model_suffix = _model_suffix(hotkey=hotkey, run_id=run_id, layer_idx=layer_idx)
-
-        logger.debug(f"All potential model weights files: {os.listdir('./weights')}")
-        weight_path = [f for f in os.listdir("./weights") if f"current_model_weights_{model_suffix}" in f]
-
-        if not weight_path:
-            raise Exception(
-                f"Model weights file not found for hotkey {hotkey[:8]} and run_id {run_id} and layer_idx {layer_idx}"
-            )
-
-        # Load the most recent snapshot (lexicographically by timestamp or by mtime)
-        weight_path = sorted(weight_path, key=lambda f: os.path.getmtime(f"./weights/{f}"))
-        latest_weight_file = weight_path[-1]
-        logger.debug(f"Loading model weights from ./weights/{latest_weight_file}")
-        model_weights = torch.load(f"./weights/{latest_weight_file}", map_location="cpu")
+        latest_weight_file = get_model_weight_path(hotkey=hotkey, run_id=run_id, layer_idx=layer_idx)
+        model_weights = torch.load(f"./weights/{latest_weight_file}", map_location="cpu", mmap=True)
 
         if model_weights is None:
             raise Exception(f"Torch load failed for model weights file {latest_weight_file}")
