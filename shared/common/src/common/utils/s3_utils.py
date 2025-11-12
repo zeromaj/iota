@@ -39,17 +39,19 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str | None, max_
 
         part_size = int(math.ceil(len(data) / len(urls)))
         assert part_size > 0, "Part size is 0"
-        chunks = [data[i : i + part_size] for i in range(0, len(data), part_size)]
 
-        logger.info(f"uploading {len(chunks)} chunks with part size {part_size}")
+        chunk_indices = range(0, len(data), part_size)
 
-        for i, (url, chunk) in enumerate(zip(urls, chunks)):
+        logger.info(f"uploading {len(chunk_indices)} chunks with part size {part_size}")
+
+        for i, (url, chunk_index) in enumerate(zip(urls, chunk_indices)):
             part_number = i + 1
+
             # Retry logic for each part
             for attempt in range(max_retries + 1):  # +1 to include initial attempt
                 try:
                     start_time = asyncio.get_event_loop().time()
-                    async with session.put(url, data=chunk) as response:
+                    async with session.put(url, data=data[chunk_index : chunk_index + part_size]) as response:
                         upload_time = asyncio.get_event_loop().time() - start_time
 
                         if not response.ok:
@@ -62,10 +64,12 @@ async def upload_parts(urls: list[str], data: bytes, upload_id: str | None, max_
                             logger.error(f"Response Body: {error_body}")
                             logger.error(f"Request URL: {url}")
                             logger.error(f"Upload ID: {upload_id}")
+
                         response.raise_for_status()
 
                         # Extract ETag from response headers (remove quotes if present)
                         etag = response.headers.get("ETag", "").strip('"')
+
                         # Log upload performance
                         upload_speed_mbps = (len(data) / (1024 * 1024)) / max(upload_time, 0.001)
                         logger.debug(
@@ -147,6 +151,7 @@ async def upload_part(urls: list[str], data: bytes, upload_id: str, max_retries:
                     logger.debug(
                         f"🏎️ Single part upload completed in {upload_time:.2f}s ({upload_speed_mbps:.2f} MB/s) 🏎️"
                     )
+                break
 
             except (
                 aiohttp.ClientError,

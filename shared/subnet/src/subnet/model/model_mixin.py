@@ -139,26 +139,16 @@ class ModelManager:
             log_gpu_memory_usage(note="after forward pass")
             return output_activations, state
 
-    """
-    Forward pass through the network:
-    Layer 0: forward (don't keep grads) -> Layer 1 forward (don't keep grads) -> Layer 2 forward (don't keep grads)
-
-    Backward pass:
-
-
-    """
-
     async def _forward_no_intermittent_activations(
-        self, layer: int, input_activations: torch.Tensor
+        self, input_activations: torch.Tensor, processing_batch_size: int
     ) -> tuple[torch.Tensor, dict]:
         input_activations.requires_grad_(False)
         with logger.contextualize(gpu="forward pass"):
-            local_batch_size = common_settings.LOCAL_BATCH_SIZE
             output_activations_list = []
             state_list = []
 
-            for i in range(0, len(input_activations), local_batch_size):
-                input_activations_batch = input_activations[i : i + local_batch_size]
+            for i in range(0, len(input_activations), processing_batch_size):
+                input_activations_batch = input_activations[i : i + processing_batch_size]
                 output_activations_batch, state = self.model(input_activations_batch)
                 output_activations_list.append(output_activations_batch.detach())
                 del output_activations_batch
@@ -208,16 +198,7 @@ class ModelManager:
                     logger.exception(e)
             else:
                 try:
-                    logger.debug(
-                        f"Backwarding output activations of shape {output_activations.shape}, activation grads of shape {activation_grads.shape}"
-                    )
-                    logger.debug(
-                        f"Backwarding output activations of shape {output_activations.shape}, activation grads of shape {activation_grads.shape}"
-                    )
                     self.model.backward(output_activations, activation_grads, state)
-                    logger.debug(
-                        f"Backwarded output activations of shape {output_activations.shape}, activation grads of shape {activation_grads.shape}"
-                    )
                 except RuntimeError as e:
                     logger.error(f"Error during backward step: {e}")
                     raise

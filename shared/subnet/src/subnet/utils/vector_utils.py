@@ -108,11 +108,10 @@ def reconstruct_optimizer_state(
     flat_tensor: torch.Tensor, tensor_shapes: list[tuple[int, ...]], state_dict: dict
 ) -> dict:
     """Reconstruct optimizer state dict from flattened tensor."""
-    new_state_dict = state_dict.copy()
 
     start_idx = 0
     tensor_idx = 0
-    for group in new_state_dict["state"].values():
+    for group in state_dict["state"].values():
         for k, v in group.items():
             if k == "step":
                 continue
@@ -123,7 +122,7 @@ def reconstruct_optimizer_state(
                 start_idx += numel
                 tensor_idx += 1
 
-    return new_state_dict
+    return state_dict
 
 
 def check_for_nans_and_infs(tensor, name: str | None = None, exception_type: type = NanInfWarning):
