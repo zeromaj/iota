@@ -202,20 +202,31 @@ async def upload_tensor(
     upload_urls: list[str] | None = None,
     object_name: str | None = None,
 ) -> CompleteFileUploadResponse:
-    # TODO: Make this function properly handle single and multipart uploads
+    """
+    Upload a tensor to the orchestrator.
+    TODO: Make this function properly handle single and multipart uploads
+
+    Args:
+        miner_api_client (MinerAPIClient): The miner API client.
+        tensor (torch.Tensor): The tensor to upload.
+        hotkey (Keypair): The hotkey of the miner.
+        file_type (Literal["activation", "weights", "optimizer_state", "local_optimizer_state"]): The type of file to upload.
+        upload_urls (list[str] | None): The upload urls to use for the upload.
+        object_name (str | None): The object name to use for the upload.
+
+    Returns:
+        CompleteFileUploadResponse: The response from the orchestrator.
+    """
+
+    assert tensor.dtype == torch.bfloat16, f"Tensor must be bfloat16, got {tensor.dtype}"
+
     assert (object_name is None and upload_urls is None) or (
         object_name is not None and upload_urls is not None
     ), "Object name and upload urls have to be provided together if provided at all"
-    num_parts = calculate_num_parts(data=tensor.view(torch.uint8).numpy().tobytes())
-    logger.info(f"Uploading {file_type} tensor with {num_parts} parts")
+
     upload_id = None
     initiate_response = None
-    multipart = num_parts > 1
     existing_upload_urls = upload_urls is not None
-
-    # Sanity checks (should not be triggered)
-    if multipart:
-        assert upload_urls is None, "Passing upload_urls which are only valid for single part uploads"
 
     # Reinterpret tensor memory as bytes in a consistent format (bfloat16 → uint8 bytes)
     # Always upload as bfloat16-backed bytes to match the downloader's default expectation.
@@ -224,11 +235,21 @@ async def upload_tensor(
         name=f"Uploading tensor of file type {file_type}",
         exception_type=NanInfException,
     )
-    tensor_cpu = tensor.detach().to("cpu").to(torch.bfloat16).contiguous()
-    data = tensor_cpu.view(torch.uint8).numpy().tobytes()
+
+    tensor = tensor.detach().to("cpu").to(torch.bfloat16).contiguous()
+    tensor = tensor.view(torch.uint8).numpy().tobytes()
+    num_parts = calculate_num_parts(data=tensor)
+    logger.info(f"Uploading {file_type} tensor with {num_parts} parts")
+    multipart = num_parts > 1
+
+    # Sanity checks (should not be triggered)
+    if multipart:
+        assert upload_urls is None, "Passing upload_urls which are only valid for single part uploads"
 
     if RUN_FLAGS.compress_s3_files.isOn():
-        data = gzip.compress(data)
+        payload = gzip.compress(tensor)
+    else:
+        payload = tensor
 
     try:
         # If we don't already have an upload url, we need to initiate a file upload request
@@ -243,7 +264,7 @@ async def upload_tensor(
                         num_parts=num_parts,
                     ),
                 )
-                assert len(tensor) > 0, "Tensor is empty"
+                assert len(payload) > 0, "Tensor is empty"
                 upload_urls = initiate_response.urls
                 upload_id = initiate_response.upload_id
             if not initiate_response:
@@ -253,7 +274,7 @@ async def upload_tensor(
         async with TimerLogger(name="upload_multipart_to_s3", metadata={"file_type": file_type}):
             logger.debug(f"Uploading tensor {file_type} to presigned urls: {upload_urls}")
             parts: list[dict] | None = await MinerAPIClient.upload_to_s3(
-                urls=upload_urls, data=data, upload_id=upload_id
+                urls=upload_urls, data=payload, upload_id=upload_id
             )
 
         # for multipart uploads, we need to manually complete the upload request

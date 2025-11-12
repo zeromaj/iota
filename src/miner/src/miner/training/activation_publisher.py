@@ -137,7 +137,7 @@ class ActivationPublisher:
             logger.warning(f"Anticipated exception has occurred while publishing loss (swallowed): {e}")
             pass
         except Exception as e:
-            logger.exception(f"Failed to publish loss to orchestrator: {e}")
+            logger.error(f"Failed to publish loss to orchestrator: {e}")
             raise
 
     async def reset(self):

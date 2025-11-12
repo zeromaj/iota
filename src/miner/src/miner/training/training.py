@@ -133,7 +133,7 @@ class TrainingPhase:
 
                 logger.debug(f"Forwarding activation of size {activation_data.input_activations.shape}")
                 output_activations_gpu, state = await self._model_manager._forward_no_intermittent_activations(
-                    layer=self._state_manager.layer, input_activations=input_activations_gpu
+                    input_activations=input_activations_gpu, processing_batch_size=miner_settings.LOCAL_BATCH_SIZE
                 )
 
                 # Cleanup GPU memory
@@ -172,7 +172,7 @@ class TrainingPhase:
                 last_layer = self._state_manager.layer == self._model_manager.model_metadata["n_splits"] - 1
                 all_input_activations_grads = []
                 losses = []
-                for i in range(0, len(activation_data.input_activations), common_settings.LOCAL_BATCH_SIZE):
+                for i in range(0, len(activation_data.input_activations), miner_settings.LOCAL_BATCH_SIZE):
                     log_gpu_memory_usage(
                         note=f"after training forward pass cleaning on last layer miner with cach size of {len(self._cache)}"
                     )
@@ -200,17 +200,17 @@ class TrainingPhase:
 
                         # Take slices
                         sliced_cached_input_activation = (
-                            cached_input_activation[i : i + common_settings.LOCAL_BATCH_SIZE].clone().contiguous()
+                            cached_input_activation[i : i + miner_settings.LOCAL_BATCH_SIZE].clone().contiguous()
                         )
 
                         if last_layer:
                             sliced_backwards_grads_from_previous_miner = None
                             sliced_targets = activation_data.sample_activations[
-                                i : i + common_settings.LOCAL_BATCH_SIZE
+                                i : i + miner_settings.LOCAL_BATCH_SIZE
                             ].contiguous()
                         else:
                             sliced_backwards_grads_from_previous_miner = (
-                                backwards_grads_from_previous_miner[i : i + common_settings.LOCAL_BATCH_SIZE]
+                                backwards_grads_from_previous_miner[i : i + miner_settings.LOCAL_BATCH_SIZE]
                                 .clone()
                                 .contiguous()
                             )
@@ -233,7 +233,7 @@ class TrainingPhase:
                     if last_layer:
                         try:
                             logger.debug(
-                                f"Computing loss for last layer miner with shape {output_activations_gpu.shape} and targets shape {sliced_targets.shape} on local batch {i} of {len(activation_data.input_activations)/common_settings.LOCAL_BATCH_SIZE}"
+                                f"Computing loss for last layer miner with shape {output_activations_gpu.shape} and targets shape {sliced_targets.shape} on local batch {i} of {len(activation_data.input_activations)/miner_settings.LOCAL_BATCH_SIZE}"
                             )
                             logger.debug(f"Targets (shape: {sliced_targets.shape}): {sliced_targets}")
                             loss = await self.compute_last_layer_loss(
@@ -241,7 +241,7 @@ class TrainingPhase:
                             )
                             # Ex: batch = 8, local_batch = 2, so we divide by 4
                             output_activations_gpu = loss / (
-                                len(activation_data.input_activations) / common_settings.LOCAL_BATCH_SIZE
+                                len(activation_data.input_activations) / miner_settings.LOCAL_BATCH_SIZE
                             )
                             # output_activations_gpu = loss
                             losses.append(loss.item())
@@ -251,13 +251,6 @@ class TrainingPhase:
                             )
                             return
 
-                    logger.debug(f"Performing backward pass for layer {self._state_manager.layer}")
-                    logger.debug(
-                        f"Output activations (shape: {sliced_cached_input_activation.shape if sliced_cached_input_activation is not None else None}): {sliced_cached_input_activation}"
-                    )
-                    logger.debug(
-                        f"Activation grads (shape: {sliced_backwards_grads_from_previous_miner.shape if sliced_backwards_grads_from_previous_miner is not None else None}): {sliced_backwards_grads_from_previous_miner}"
-                    )
                     logger.debug(f"State: {state}")
                     async with TimerLogger(name="backward pass"):
                         await self._model_manager._backward(

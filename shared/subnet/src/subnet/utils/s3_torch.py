@@ -86,23 +86,35 @@ async def download_tensor(
 
             return loaded_tensor
 
-        except aiohttp.ClientResponseError as e:
-            if e.status >= 500 or e.status == 429:
+        except (aiohttp.ClientResponseError, aiohttp.ClientConnectorDNSError, aiohttp.ClientConnectorError) as e:
+            # Determine if error is retryable
+            is_retryable = False
+            error_type = "Unknown error"
+
+            if isinstance(e, aiohttp.ClientResponseError):
+                if e.status >= 500 or e.status == 429:
+                    is_retryable = True
+                    error_type = f"HTTP {e.status}"
+                else:
+                    logger.error(f"HTTP error downloading tensor: {e}")
+                    raise
+            else:  # ClientConnectorDNSError or ClientConnectorError
+                is_retryable = True
+                error_type = "DNS/network"
+
+            if is_retryable:
                 if attempt < max_retries:
                     delay = 2**attempt
                     logger.warning(
-                        f"Retryable error (HTTP {e.status}), retrying in {delay}s... (attempt {attempt + 1}/{max_retries + 1})"
+                        f"Retryable error ({error_type}) downloading tensor from R2: {e}. Retrying in {delay}s... (attempt {attempt + 1}/{max_retries + 1})"
                     )
                     await asyncio.sleep(delay)
                     continue
                 else:
                     logger.warning(
-                        f"Server error (HTTP {e.status}) downloading tensor from R2: {e}. Failed after {max_retries + 1} attempts. This is likely a temporary R2 issue."
+                        f"Retryable error ({error_type}) downloading tensor from R2: {e}. Failed after {max_retries + 1} attempts. This is likely a temporary issue."
                     )
                     raise
-            else:
-                logger.error(f"HTTP error downloading tensor: {e}")
-                raise
 
         except Exception as e:
             logger.error(f"Error downloading tensor: {e}")
@@ -141,23 +153,35 @@ async def download_weights_or_optimizer_state(
                 f"Timeout error downloading weights or optimizer state: {e}. Time taken: {time() - start_time} seconds. Started download at {start_time}."
             )
             raise
-        except aiohttp.ClientResponseError as e:
-            if e.status >= 500 or e.status == 429:
+        except (aiohttp.ClientResponseError, aiohttp.ClientConnectorDNSError, aiohttp.ClientConnectorError) as e:
+            # Determine if error is retryable
+            is_retryable = False
+            error_type = "Unknown error"
+
+            if isinstance(e, aiohttp.ClientResponseError):
+                if e.status >= 500 or e.status == 429:
+                    is_retryable = True
+                    error_type = f"HTTP {e.status}"
+                else:
+                    logger.error(f"HTTP error downloading weights or optimizer state: {e}")
+                    raise
+            else:  # ClientConnectorDNSError or ClientConnectorError
+                is_retryable = True
+                error_type = "DNS/network"
+
+            if is_retryable:
                 if attempt < max_retries:
                     delay = 2**attempt
                     logger.warning(
-                        f"Retryable error (HTTP {e.status}), retrying in {delay}s... (attempt {attempt + 1}/{max_retries + 1})"
+                        f"Retryable error ({error_type}) downloading weights or optimizer state from R2: {e}. Retrying in {delay}s... (attempt {attempt + 1}/{max_retries + 1})"
                     )
                     await asyncio.sleep(delay)
                     continue
                 else:
                     logger.warning(
-                        f"Server error (HTTP {e.status}) downloading weights or optimizer state from R2: {e}. Failed after {max_retries + 1} attempts. This is likely a temporary R2 issue."
+                        f"Retryable error ({error_type}) downloading weights or optimizer state from R2: {e}. Failed after {max_retries + 1} attempts. This is likely a temporary issue."
                     )
                     raise
-            else:
-                logger.error(f"HTTP error downloading weights or optimizer state: {e}")
-                raise
         except Exception as e:
             logger.error(f"Error downloading weights or optimizer state: {e}")
             raise

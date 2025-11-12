@@ -210,6 +210,10 @@ class Miner(BaseNeuron, HealthServerMixin):
             except aiohttp.ClientResponseError as e:
                 logger.info(f"🔄 Miner {self.hotkey[:8]} Client response error: {e}")
                 continue
+            except (aiohttp.ClientConnectorDNSError, aiohttp.ClientConnectorError) as e:
+                logger.warning(f"🔄 Miner {self.hotkey[:8]} Connection error (DNS/network): {e}. Retrying...")
+                await asyncio.sleep(5)  # Brief delay before retrying on connection errors
+                continue
             except (asyncio.TimeoutError, TimeoutError) as e:
                 logger.warning(f"🔄 Miner {self.hotkey[:8]} Timeout error: {e}")
                 continue
@@ -312,18 +316,21 @@ class Miner(BaseNeuron, HealthServerMixin):
             # For diloco we want to upload the pseudo gradients to the orchestrator
             if previous_weights is None:
                 raise Exception(f"Previous weights are None for miner {self.hotkey[:8]}")
+
             # creating changes
             pseudo_gradients = torch.zeros_like(previous_weights).to(torch.bfloat16)
-            batches = 100
+
             # iterate over pseudo gradients in batches and fill them - this avoids using unnecessary memory usage
-            for i in range(batches):
+            for i in range(miner_settings.PSEUDO_GRADIENTS_BATCH_SIZE):
                 logger.debug(f"Getting pseudo gradients for batch {i}")
-                previous_weights_batch = previous_weights[i::batches]
-                current_weights_batch = current_weights[i::batches]
+                previous_weights_batch = previous_weights[i :: miner_settings.PSEUDO_GRADIENTS_BATCH_SIZE]
+                current_weights_batch = current_weights[i :: miner_settings.PSEUDO_GRADIENTS_BATCH_SIZE]
                 pseudo_gradients_batch = previous_weights_batch.to(torch.float32) - current_weights_batch.to(
                     torch.float32
                 )
-                pseudo_gradients[i::batches] = pseudo_gradients_batch.to(torch.bfloat16)
+                pseudo_gradients[i :: miner_settings.PSEUDO_GRADIENTS_BATCH_SIZE] = pseudo_gradients_batch.to(
+                    torch.bfloat16
+                )
 
             pseudo_gradients = await self.model_manager.clip_pseudo_gradients(pseudo_gradients)
 
@@ -583,12 +590,13 @@ class Miner(BaseNeuron, HealthServerMixin):
                 )
 
                 # Do the actual merging (apply the optimizer state to the weights)
+                weights_length = sum([p.numel() for p in old_model.parameters()])
                 merged_partitions = await merge_partition_batch(
                     partition_batch=merging_partitions,
                     filtered_metadata=filtered_metadata,
                     old_model=old_model,
                     local_optimizer_state=self.model_manager.optimizer,
-                    weights_length=torch.nn.utils.parameters_to_vector(old_model.parameters()).numel(),
+                    weights_length=weights_length,
                     num_partitions=self.num_partitions,
                     device=device,
                 )
